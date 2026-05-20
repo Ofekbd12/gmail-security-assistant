@@ -16,13 +16,15 @@ Gmail Security Assistant provides an on-demand security assistant inside Gmail.
 ## System Showcase
 
 | Add-on Home Interface | Opened Email Interface |
-|---|---|
-| ![Gmail Security Assistant Home Interface](screenshots/Security_Assistant_Home_Interface.png) | ![Gmail Security Assistant Opened on Email](screenshots/Security_Assistant_Mail_Page.png) |
+| :---: | :---: |
+| Initial Gmail Security Assistant interface inside Gmail. | Add-on interface when a specific email is opened. |
+| <img src="screenshots/Security_Assistant_Home_Interface.png" width="380"> | <img src="screenshots/Security_Assistant_Mail_Page.png" width="380"> |
 
 ---
 
 ## Demo Videos
 
 | Deep Single Email Scan | Batch Scan with Scan Queue | Malicious Email Detection |
-|---|---|---|
+| :---: | :---: | :---: |
+| Full scan of one opened email, including detailed breakdown. | Selecting multiple emails and running batch analysis. | Detecting a deliberately suspicious demo email. |
 | [Watch demo](screenshots/Security_Assistant_Mail_Scanning.mp4) | [Watch demo](screenshots/Security_Assistant_Batch_Scanning.mp4) | [Watch demo](screenshots/Security_Assistant_Malicious_Mail.mp4) |
