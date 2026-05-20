@@ -122,3 +122,14 @@ def test_batch_report_includes_score_above_three():
 
 def test_batch_report_includes_suspicious_verdict():
     assert should_include_in_batch_report(2, "Suspicious") is True
+    
+def test_negative_category_scores_are_clamped_to_minimum_score_one():
+    risk_breakdown = make_risk_breakdown(
+        sender=-5,
+        content=-3,
+        social=-10,
+        link=-2,
+        attachment=-1,
+    )
+
+    assert calculate_final_score_from_breakdown(risk_breakdown) == 1

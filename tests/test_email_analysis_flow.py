@@ -210,3 +210,4 @@ def test_missing_risk_category_is_treated_as_zero():
 def test_batch_threshold_exact_boundary():
     assert should_include_in_batch_report(3, "Low Risk") is False
     assert should_include_in_batch_report(4, "Low Risk") is True
+    
