@@ -20,7 +20,7 @@ client = OpenAI(api_key=api_key)
 app = FastAPI(
     title="Gmail Security Assistant API",
     description=(
-        "Backend service for analyzing a user-selected email "
+        "Backend service for analyzing user-selected emails "
         "using LLM-based phishing and malicious-risk scoring."
     ),
     version="1.0.0",
@@ -61,6 +61,31 @@ class EmailAnalysisResponse(BaseModel):
     display_label: str
 
 
+class BatchEmailScanRequest(BaseModel):
+    emails: list[EmailRequest]
+
+
+class BatchEmailSummary(BaseModel):
+    email_index: int
+    sender: str
+    subject: str
+    score: int
+    verdict: str
+    summary: str
+    reasons: list[str]
+    recommended_actions: list[str]
+    should_warn: bool
+    severity_color: str
+    display_label: str
+
+
+class BatchEmailScanResponse(BaseModel):
+    emails_analyzed: int
+    risky_emails_found: bool
+    risky_emails_count: int
+    risky_emails: list[BatchEmailSummary]
+
+
 @app.get("/")
 def home():
     return {"message": "Backend is running"}
@@ -91,14 +116,104 @@ def analyze_email(email: EmailRequest):
         )
 
 
+@app.post("/analyze-email-batch", response_model=BatchEmailScanResponse)
+def analyze_email_batch(request: BatchEmailScanRequest):
+    """
+    User-controlled batch scan flow:
+    The user adds selected emails to the scan queue.
+    The backend analyzes the selected emails in one LLM call.
+    Only emails with score >= 5, or meaningful suspicious verdicts,
+    are returned in the report.
+    """
+    try:
+        if not request.emails:
+            return {
+                "emails_analyzed": 0,
+                "risky_emails_found": False,
+                "risky_emails_count": 0,
+                "risky_emails": [],
+            }
+
+        batch_result = analyze_batch_emails_with_llm(request.emails)
+        risky_emails = []
+
+        for item in batch_result.get("risky_emails", []):
+            email_index = item.get("email_index")
+
+            if email_index is None:
+                continue
+
+            if email_index < 0 or email_index >= len(request.emails):
+                continue
+
+            original_email = request.emails[email_index]
+
+            score = int(item.get("score", 1))
+            verdict = item.get("verdict", "Suspicious")
+
+            if not should_include_in_batch_report(score, verdict):
+                continue
+
+            ui_metadata = build_ui_metadata(score, verdict)
+
+            risky_emails.append(
+                {
+                    "email_index": email_index,
+                    "sender": original_email.sender,
+                    "subject": original_email.subject,
+                    "score": score,
+                    "verdict": verdict,
+                    "summary": item.get(
+                        "summary",
+                        "This email may require attention."
+                    ),
+                    "reasons": item.get(
+                        "reasons",
+                        ["This email matched suspicious risk indicators."]
+                    ),
+                    "recommended_actions": item.get(
+                        "recommended_actions",
+                        ["Review this email carefully before taking action."]
+                    ),
+                    "should_warn": ui_metadata["should_warn"],
+                    "severity_color": ui_metadata["severity_color"],
+                    "display_label": ui_metadata["display_label"],
+                }
+            )
+
+        return {
+            "emails_analyzed": len(request.emails),
+            "risky_emails_found": len(risky_emails) > 0,
+            "risky_emails_count": len(risky_emails),
+            "risky_emails": risky_emails,
+        }
+
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=500,
+            detail="LLM returned an invalid JSON response."
+        )
+
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Batch email analysis failed: {str(error)}"
+        )
+
+
+def should_include_in_batch_report(score: int, verdict: str) -> bool:
+    """
+    Batch scan should return only emails that require user attention.
+    Minimum inclusion threshold: score >= 5.
+    """
+    risky_verdicts = ["Suspicious", "High Risk", "Malicious"]
+
+    return score >= 5 or verdict in risky_verdicts
+
+
 def add_ui_metadata(analysis: dict) -> dict:
     """
     Adds UI-oriented metadata to the LLM analysis result.
-
-    The Gmail add-on uses these fields to decide:
-    - whether to show a warning
-    - which severity color to display
-    - which short label to show to the user
     """
     score = analysis.get("score", 1)
     verdict = analysis.get("verdict", "Safe")
@@ -160,6 +275,110 @@ def parse_llm_json(raw_text: str):
         cleaned_text = cleaned_text[:-3].strip()
 
     return json.loads(cleaned_text)
+
+
+def analyze_batch_emails_with_llm(emails: list[EmailRequest]):
+    """
+    Lightweight batch analysis for user-selected scan queue.
+
+    This function sends all selected emails to the LLM in one call.
+    It asks the LLM to return only emails with score >= 5 or meaningful risk.
+    """
+    email_items = []
+
+    for index, email in enumerate(emails):
+        email_items.append(
+            {
+                "email_index": index,
+                "sender": email.sender,
+                "subject": email.subject,
+                "body": email.body[:1500],
+                "links": email.links,
+                "attachments": email.attachments,
+            }
+        )
+
+    prompt = f"""
+You are an email security assistant integrated into Gmail.
+
+You are performing a user-controlled Scan Queue analysis.
+
+The user selected several emails for analysis.
+Your goal is to review the selected emails and return ONLY emails that require
+user attention.
+
+Do not return clearly safe or low-risk emails.
+
+Minimum inclusion threshold:
+- Include an email only if score >= 5.
+- Also include emails with verdict "Suspicious", "High Risk", or "Malicious".
+- Do not include Safe or Low Risk emails unless there is a concrete reason
+  the user should review them.
+
+Evaluate each email according to:
+1. Sender identity and possible impersonation
+2. Subject line
+3. Message body
+4. Urgency or pressure tactics
+5. Requests for passwords, login, payment, verification, MFA codes,
+   or personal data
+6. Social engineering patterns
+7. Suspicious links
+8. Suspicious attachments
+9. Overall phishing or malicious intent
+
+Scoring instructions:
+- score must be an integer from 1 to 10.
+- 1 means clearly safe.
+- 10 means clearly malicious.
+- Be strict with suspicious links, credential requests, fake domains,
+  and dangerous attachments.
+- Do not exaggerate risk without concrete indicators.
+
+Return ONLY valid JSON in this exact structure:
+
+{{
+  "risky_emails": [
+    {{
+      "email_index": 0,
+      "score": 7,
+      "verdict": "Suspicious",
+      "summary": "short explanation of why this email requires attention",
+      "reasons": [
+        "reason 1",
+        "reason 2"
+      ],
+      "recommended_actions": [
+        "action 1",
+        "action 2"
+      ]
+    }}
+  ]
+}}
+
+Allowed verdict values:
+- Suspicious
+- High Risk
+- Malicious
+
+If there are no risky emails, return:
+
+{{
+  "risky_emails": []
+}}
+
+Emails:
+{json.dumps(email_items, ensure_ascii=False)}
+"""
+
+    response = client.responses.create(
+        model="gpt-4.1-mini",
+        input=prompt
+    )
+
+    raw_text = response.output_text
+
+    return parse_llm_json(raw_text)
 
 
 def analyze_single_email_with_llm(email: EmailRequest):
