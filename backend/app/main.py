@@ -1,9 +1,10 @@
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from openai import OpenAI
 import os
 import json
+import logging
 
 
 load_dotenv(override=True)
@@ -17,31 +18,29 @@ if not api_key:
 
 client = OpenAI(api_key=api_key)
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+
+logger = logging.getLogger("gmail-security-assistant")
+
 app = FastAPI(
     title="Gmail Security Assistant API",
     description=(
-        "Backend service for analyzing user-selected emails "
-        "using LLM-based phishing and malicious-risk scoring."
+        "Backend service for analyzing suspicious emails using "
+        "LLM-based risk analysis and deterministic backend scoring."
     ),
     version="1.0.0",
 )
-
-
-RISK_WEIGHTS = {
-    "sender_risk": 0.25,
-    "content_risk": 0.20,
-    "social_engineering_risk": 0.20,
-    "link_risk": 0.25,
-    "attachment_risk": 0.10,
-}
 
 
 class EmailRequest(BaseModel):
     sender: str
     subject: str
     body: str
-    links: list[str] = []
-    attachments: list[str] = []
+    links: list[str] = Field(default_factory=list)
+    attachments: list[str] = Field(default_factory=list)
 
 
 class RiskCategory(BaseModel):
@@ -70,29 +69,28 @@ class EmailAnalysisResponse(BaseModel):
     display_label: str
 
 
-class BatchEmailScanRequest(BaseModel):
+class BatchEmailAnalysisRequest(BaseModel):
     emails: list[EmailRequest]
 
 
-class BatchEmailSummary(BaseModel):
+class RiskyEmailSummary(BaseModel):
     email_index: int
     sender: str
     subject: str
     score: int
     verdict: str
     summary: str
-    reasons: list[str]
     recommended_actions: list[str]
     should_warn: bool
     severity_color: str
     display_label: str
 
 
-class BatchEmailScanResponse(BaseModel):
+class BatchEmailAnalysisResponse(BaseModel):
     emails_analyzed: int
     risky_emails_found: bool
     risky_emails_count: int
-    risky_emails: list[BatchEmailSummary]
+    risky_emails: list[RiskyEmailSummary]
 
 
 @app.get("/")
@@ -104,38 +102,75 @@ def home():
 def analyze_email(email: EmailRequest):
     """
     Manual scan flow:
-    The user opens a specific email and clicks 'Scan Current Email'.
-    The backend returns a full risk analysis for that selected email.
+    The user opens a specific email and clicks "Scan Current Email".
+    The backend returns a full detailed risk analysis for that email.
     """
+    logger.info(
+        "Single email analysis started | sender=%s | subject_length=%s | body_length=%s | links=%s | attachments=%s",
+        sanitize_text(email.sender),
+        len(email.subject or ""),
+        len(email.body or ""),
+        len(email.links),
+        len(email.attachments),
+    )
+
     try:
         analysis = analyze_single_email_with_llm(email)
-        analysis_with_score = add_deterministic_scoring_metadata(analysis)
-        return analysis_with_score
+        analysis_with_metadata = add_deterministic_scoring_metadata(analysis)
+
+        logger.info(
+            "Single email analysis completed | sender=%s | score=%s | verdict=%s | should_warn=%s",
+            sanitize_text(email.sender),
+            analysis_with_metadata.get("score"),
+            analysis_with_metadata.get("verdict"),
+            analysis_with_metadata.get("should_warn"),
+        )
+
+        return analysis_with_metadata
 
     except json.JSONDecodeError:
+        logger.exception(
+            "Single email analysis failed because the LLM returned invalid JSON | sender=%s",
+            sanitize_text(email.sender),
+        )
+
         raise HTTPException(
             status_code=500,
-            detail="LLM returned an invalid JSON response."
+            detail="LLM returned an invalid JSON response.",
         )
 
     except Exception as error:
+        logger.exception(
+            "Single email analysis failed | sender=%s | error=%s",
+            sanitize_text(email.sender),
+            str(error),
+        )
+
         raise HTTPException(
             status_code=500,
-            detail=f"Email analysis failed: {str(error)}"
+            detail=f"Email analysis failed: {str(error)}",
         )
 
 
-@app.post("/analyze-email-batch", response_model=BatchEmailScanResponse)
-def analyze_email_batch(request: BatchEmailScanRequest):
+@app.post("/analyze-email-batch", response_model=BatchEmailAnalysisResponse)
+def analyze_email_batch(request: BatchEmailAnalysisRequest):
     """
-    User-controlled batch scan flow:
-    The user adds selected emails to the scan queue.
-    The backend analyzes the selected emails in one LLM call.
-    Only emails with score > 3, or meaningful suspicious verdicts,
-    are returned in the report.
+    Batch scan flow:
+    The user adds selected emails to the Scan Queue and clicks
+    "Scan Selected Emails".
+
+    The backend analyzes all selected emails in one LLM call and returns only
+    emails whose deterministic final score is greater than 3.
     """
+    logger.info(
+        "Batch email analysis started | emails_count=%s",
+        len(request.emails),
+    )
+
     try:
         if not request.emails:
+            logger.info("Batch email analysis skipped | emails_count=0")
+
             return {
                 "emails_analyzed": 0,
                 "risky_emails_found": False,
@@ -146,7 +181,7 @@ def analyze_email_batch(request: BatchEmailScanRequest):
         batch_result = analyze_batch_emails_with_llm(request.emails)
         risky_emails = []
 
-        for item in batch_result.get("analyzed_emails", []):
+        for item in batch_result.get("emails", []):
             email_index = item.get("email_index")
 
             if email_index is None:
@@ -157,10 +192,13 @@ def analyze_email_batch(request: BatchEmailScanRequest):
 
             original_email = request.emails[email_index]
 
-            item_with_score = add_deterministic_scoring_metadata(item)
+            analysis = normalize_llm_analysis(item)
+            analysis_with_metadata = add_deterministic_scoring_metadata(
+                analysis
+            )
 
-            score = item_with_score["score"]
-            verdict = item_with_score["verdict"]
+            score = analysis_with_metadata["score"]
+            verdict = analysis_with_metadata["verdict"]
 
             if not should_include_in_batch_report(score, verdict):
                 continue
@@ -168,27 +206,29 @@ def analyze_email_batch(request: BatchEmailScanRequest):
             risky_emails.append(
                 {
                     "email_index": email_index,
-                    "sender": original_email.sender,
-                    "subject": original_email.subject,
+                    "sender": sanitize_text(original_email.sender),
+                    "subject": sanitize_text(original_email.subject),
                     "score": score,
                     "verdict": verdict,
-                    "summary": item_with_score.get(
-                        "summary",
-                        "This email may require attention."
-                    ),
-                    "reasons": item_with_score.get(
-                        "reasons",
-                        ["This email matched suspicious risk indicators."]
-                    ),
-                    "recommended_actions": item_with_score.get(
-                        "recommended_actions",
-                        ["Review this email carefully before taking action."]
-                    ),
-                    "should_warn": item_with_score["should_warn"],
-                    "severity_color": item_with_score["severity_color"],
-                    "display_label": item_with_score["display_label"],
+                    "summary": analysis_with_metadata["summary"],
+                    "recommended_actions": analysis_with_metadata[
+                        "recommended_actions"
+                    ],
+                    "should_warn": analysis_with_metadata["should_warn"],
+                    "severity_color": analysis_with_metadata[
+                        "severity_color"
+                    ],
+                    "display_label": analysis_with_metadata[
+                        "display_label"
+                    ],
                 }
             )
+
+        logger.info(
+            "Batch email analysis completed | emails_analyzed=%s | risky_emails_count=%s",
+            len(request.emails),
+            len(risky_emails),
+        )
 
         return {
             "emails_analyzed": len(request.emails),
@@ -198,93 +238,118 @@ def analyze_email_batch(request: BatchEmailScanRequest):
         }
 
     except json.JSONDecodeError:
+        logger.exception(
+            "Batch email analysis failed because the LLM returned invalid JSON | emails_count=%s",
+            len(request.emails),
+        )
+
         raise HTTPException(
             status_code=500,
-            detail="LLM returned an invalid JSON response."
+            detail="LLM returned an invalid JSON response.",
         )
 
     except Exception as error:
+        logger.exception(
+            "Batch email analysis failed | emails_count=%s | error=%s",
+            len(request.emails),
+            str(error),
+        )
+
         raise HTTPException(
             status_code=500,
-            detail=f"Batch email analysis failed: {str(error)}"
+            detail=f"Batch email analysis failed: {str(error)}",
         )
 
 
-def should_include_in_batch_report(score: int, verdict: str) -> bool:
+def sanitize_text(value) -> str:
     """
-    Batch scan should return only emails that require user attention.
-    Minimum inclusion threshold: score > 3.
+    Removes invalid Unicode surrogate characters that may appear in Gmail
+    message bodies or subjects and break UTF-8 encoding.
     """
-    risky_verdicts = ["Suspicious", "High Risk", "Malicious"]
+    if value is None:
+        return ""
 
-    return score > 3 or verdict in risky_verdicts
+    text = str(value)
+
+    return (
+        text.encode("utf-8", errors="ignore")
+        .decode("utf-8", errors="ignore")
+    )
 
 
-def add_deterministic_scoring_metadata(analysis: dict) -> dict:
+def sanitize_email(email: EmailRequest) -> dict:
     """
-    Calculates the final score, verdict, and UI metadata deterministically
-    from the per-category risk breakdown.
-
-    The LLM identifies and explains risk indicators.
-    The backend owns the final scoring logic.
+    Sanitizes all email fields before sending them to the LLM.
     """
-    risk_breakdown = analysis.get("risk_breakdown")
-
-    if not risk_breakdown:
-        raise ValueError("Missing risk_breakdown in LLM response.")
-
-    score = calculate_final_score_from_breakdown(risk_breakdown)
-    verdict = build_verdict_from_score(score)
-    ui_metadata = build_ui_metadata(score, verdict)
-
     return {
-        **analysis,
-        "score": score,
-        "verdict": verdict,
-        **ui_metadata,
+        "sender": sanitize_text(email.sender),
+        "subject": sanitize_text(email.subject),
+        "body": sanitize_text(email.body),
+        "links": [sanitize_text(link) for link in email.links],
+        "attachments": [
+            sanitize_text(attachment) for attachment in email.attachments
+        ],
     }
+
+
+def clamp(value: int, minimum: int, maximum: int) -> int:
+    return max(minimum, min(maximum, value))
+
+
+def get_category_score(risk_breakdown: dict, category_name: str) -> int:
+    """
+    Safely extracts a category score from the LLM risk breakdown.
+    Missing or invalid categories are treated as zero.
+    """
+    category = risk_breakdown.get(category_name, {})
+
+    try:
+        score = int(category.get("score", 0))
+    except (TypeError, ValueError):
+        score = 0
+
+    return clamp(score, 0, 10)
 
 
 def calculate_final_score_from_breakdown(risk_breakdown: dict) -> int:
     """
-    Weighted final score calculation.
+    Calculates the final risk score using deterministic backend logic.
 
-    Final Score =
-    0.25 * Sender Risk
-    + 0.20 * Content Risk
-    + 0.20 * Social Engineering Risk
-    + 0.25 * Link Risk
-    + 0.10 * Attachment Risk
+    Weights:
+    - Sender Risk: 25%
+    - Content Risk: 20%
+    - Social Engineering Risk: 20%
+    - Link Risk: 25%
+    - Attachment Risk: 10%
     """
-    weighted_score = 0.0
+    sender_score = get_category_score(risk_breakdown, "sender_risk")
+    content_score = get_category_score(risk_breakdown, "content_risk")
+    social_score = get_category_score(
+        risk_breakdown,
+        "social_engineering_risk",
+    )
+    link_score = get_category_score(risk_breakdown, "link_risk")
+    attachment_score = get_category_score(
+        risk_breakdown,
+        "attachment_risk",
+    )
 
-    for category_name, weight in RISK_WEIGHTS.items():
-        category = risk_breakdown.get(category_name, {})
-        category_score = category.get("score", 0)
-        category_score = clamp_score(category_score, 0, 10)
-
-        weighted_score += weight * category_score
+    weighted_score = (
+        0.25 * sender_score
+        + 0.20 * content_score
+        + 0.20 * social_score
+        + 0.25 * link_score
+        + 0.10 * attachment_score
+    )
 
     final_score = round(weighted_score)
 
-    return clamp_score(final_score, 1, 10)
-
-
-def clamp_score(value: int | float, minimum: int, maximum: int) -> int:
-    """
-    Keeps scores inside the expected range.
-    """
-    try:
-        numeric_value = int(round(float(value)))
-    except (TypeError, ValueError):
-        numeric_value = minimum
-
-    return max(minimum, min(maximum, numeric_value))
+    return clamp(final_score, 1, 10)
 
 
 def build_verdict_from_score(score: int) -> str:
     """
-    Converts final deterministic score into a verdict.
+    Maps the deterministic final score to a user-facing verdict.
     """
     if score >= 8:
         return "Malicious"
@@ -300,23 +365,23 @@ def build_verdict_from_score(score: int) -> str:
 
 def build_ui_metadata(score: int, verdict: str) -> dict:
     """
-    Converts risk score and verdict into simple UI display decisions.
+    Converts score and verdict into UI display metadata.
     """
-    if score >= 8 or verdict == "Malicious":
+    if verdict == "Malicious":
         return {
             "should_warn": True,
             "severity_color": "red",
             "display_label": "Malicious",
         }
 
-    if score >= 5 or verdict in ["Suspicious", "High Risk"]:
+    if verdict == "Suspicious":
         return {
             "should_warn": True,
             "severity_color": "orange",
             "display_label": "Suspicious",
         }
 
-    if score >= 3 or verdict == "Low Risk":
+    if verdict == "Low Risk":
         return {
             "should_warn": False,
             "severity_color": "yellow",
@@ -330,10 +395,115 @@ def build_ui_metadata(score: int, verdict: str) -> dict:
     }
 
 
+def should_include_in_batch_report(score: int, verdict: str) -> bool:
+    """
+    Batch reports should include only emails that require attention.
+
+    Current project decision:
+    show only emails whose final deterministic score is greater than 3.
+    """
+    return score > 3
+
+
+def build_default_risk_category(explanation: str = "No relevant risk detected.") -> dict:
+    return {
+        "score": 0,
+        "max_score": 10,
+        "explanation": explanation,
+    }
+
+
+def normalize_risk_breakdown(risk_breakdown: dict) -> dict:
+    """
+    Ensures the risk breakdown includes all required categories.
+    Missing categories are filled with score 0.
+    """
+    if not isinstance(risk_breakdown, dict):
+        risk_breakdown = {}
+
+    return {
+        "sender_risk": risk_breakdown.get(
+            "sender_risk",
+            build_default_risk_category("No sender risk detected."),
+        ),
+        "content_risk": risk_breakdown.get(
+            "content_risk",
+            build_default_risk_category("No content risk detected."),
+        ),
+        "social_engineering_risk": risk_breakdown.get(
+            "social_engineering_risk",
+            build_default_risk_category(
+                "No social engineering risk detected."
+            ),
+        ),
+        "link_risk": risk_breakdown.get(
+            "link_risk",
+            build_default_risk_category("No link risk detected."),
+        ),
+        "attachment_risk": risk_breakdown.get(
+            "attachment_risk",
+            build_default_risk_category("No attachment risk detected."),
+        ),
+    }
+
+
+def normalize_llm_analysis(analysis: dict) -> dict:
+    """
+    Normalizes LLM output so the backend response remains stable even if
+    optional fields are missing.
+    """
+    normalized_risk_breakdown = normalize_risk_breakdown(
+        analysis.get("risk_breakdown", {})
+    )
+
+    return {
+        "summary": analysis.get(
+            "summary",
+            "The email was analyzed for security risk indicators.",
+        ),
+        "reasons": analysis.get(
+            "reasons",
+            ["No detailed reasons were provided."],
+        ),
+        "risk_breakdown": normalized_risk_breakdown,
+        "recommended_actions": analysis.get(
+            "recommended_actions",
+            ["Review this email carefully before taking action."],
+        ),
+    }
+
+
+def add_deterministic_scoring_metadata(analysis: dict) -> dict:
+    """
+    Adds deterministic backend scoring and UI metadata to the LLM analysis.
+    """
+    normalized_analysis = normalize_llm_analysis(analysis)
+
+    final_score = calculate_final_score_from_breakdown(
+        normalized_analysis["risk_breakdown"]
+    )
+
+    verdict = build_verdict_from_score(final_score)
+    ui_metadata = build_ui_metadata(final_score, verdict)
+
+    logger.info(
+        "Deterministic score calculated | score=%s | verdict=%s",
+        final_score,
+        verdict,
+    )
+
+    return {
+        **normalized_analysis,
+        "score": final_score,
+        "verdict": verdict,
+        **ui_metadata,
+    }
+
+
 def parse_llm_json(raw_text: str):
     """
     Converts the LLM response into JSON.
-    Removes markdown wrapping if needed.
+    Removes markdown code fences if needed.
     """
     cleaned_text = raw_text.strip()
 
@@ -349,51 +519,33 @@ def parse_llm_json(raw_text: str):
     return json.loads(cleaned_text)
 
 
-def analyze_batch_emails_with_llm(emails: list[EmailRequest]):
-    """
-    Lightweight batch analysis for user-selected scan queue.
-
-    This function sends all selected emails to the LLM in one call.
-    The LLM returns per-category risk scores and explanations.
-    The backend calculates the final score deterministically.
-    """
-    email_items = []
-
-    for index, email in enumerate(emails):
-        email_items.append(
-            {
-                "email_index": index,
-                "sender": email.sender,
-                "subject": email.subject,
-                "body": email.body[:1500],
-                "links": email.links,
-                "attachments": email.attachments,
-            }
-        )
+def analyze_single_email_with_llm(email: EmailRequest):
+    sanitized_email = sanitize_email(email)
 
     prompt = f"""
 You are an email security assistant integrated into Gmail.
 
-You are performing a user-controlled Scan Queue analysis.
+Analyze the following email and determine whether it contains security risk
+indicators such as phishing, impersonation, social engineering, malicious links,
+or suspicious attachments.
 
-The user selected several emails for analysis.
+Important:
+- Return only valid JSON.
+- Do not include markdown.
+- Do not include text before or after the JSON.
+- The final score and verdict will be calculated by the backend.
+- Your task is to provide category-level risk scores and explanations.
 
-Your job:
-- Analyze every selected email.
-- For each email, identify and explain risk indicators by category.
-- Do NOT calculate the final overall score.
-- The backend will calculate the final score using a deterministic weighted formula.
-
-Evaluate each email according to:
+Evaluate the email according to these criteria:
 1. Sender identity and possible impersonation
-2. Subject line and message content
-3. Urgency or pressure tactics
-4. Requests for passwords, login, payment, verification, MFA codes,
-   or personal data
-5. Social engineering patterns
-6. Suspicious links
-7. Suspicious attachments
-8. Overall phishing or malicious intent
+2. Subject line
+3. Message body
+4. Urgency or pressure tactics
+5. Requests for passwords, login, payment, MFA codes, or personal data
+6. Social engineering patterns
+7. Suspicious links
+8. Suspicious attachments
+9. Overall phishing or malicious intent
 
 Risk breakdown instructions:
 - Each risk_breakdown category must include:
@@ -402,15 +554,114 @@ Risk breakdown instructions:
   - explanation: short explanation for that category score
 - If a category has no meaningful risk indicators, use score 0 and explain
   that no relevant risk was detected.
-- Do not exaggerate risk without concrete indicators.
 
 Return ONLY valid JSON in this exact structure:
 
 {{
-  "analyzed_emails": [
+  "summary": "short explanation in one sentence",
+  "reasons": [
+    "reason 1",
+    "reason 2"
+  ],
+  "risk_breakdown": {{
+    "sender_risk": {{
+      "score": 0,
+      "max_score": 10,
+      "explanation": "short explanation"
+    }},
+    "content_risk": {{
+      "score": 0,
+      "max_score": 10,
+      "explanation": "short explanation"
+    }},
+    "social_engineering_risk": {{
+      "score": 0,
+      "max_score": 10,
+      "explanation": "short explanation"
+    }},
+    "link_risk": {{
+      "score": 0,
+      "max_score": 10,
+      "explanation": "short explanation"
+    }},
+    "attachment_risk": {{
+      "score": 0,
+      "max_score": 10,
+      "explanation": "short explanation"
+    }}
+  }},
+  "recommended_actions": [
+    "action 1",
+    "action 2"
+  ]
+}}
+
+Email:
+Sender: {sanitized_email["sender"]}
+Subject: {sanitized_email["subject"]}
+Body: {sanitized_email["body"]}
+Links: {sanitized_email["links"]}
+Attachments: {sanitized_email["attachments"]}
+"""
+
+    response = client.responses.create(
+        model="gpt-4.1-mini",
+        input=prompt,
+    )
+
+    raw_text = response.output_text
+
+    return parse_llm_json(raw_text)
+
+
+def analyze_batch_emails_with_llm(emails: list[EmailRequest]):
+    email_items = []
+
+    for index, email in enumerate(emails):
+        sanitized_email = sanitize_email(email)
+
+        email_items.append(
+            {
+                "email_index": index,
+                "sender": sanitized_email["sender"],
+                "subject": sanitized_email["subject"],
+                "body": sanitized_email["body"][:1500],
+                "links": sanitized_email["links"],
+                "attachments": sanitized_email["attachments"],
+            }
+        )
+
+    prompt = f"""
+You are an email security assistant integrated into Gmail.
+
+You are performing a batch scan of user-selected emails from a Scan Queue.
+
+Important:
+- Return only valid JSON.
+- Do not include markdown.
+- Do not include text before or after the JSON.
+- Analyze every email in the input list.
+- The backend will calculate the final score and decide which emails to show.
+- Your task is to provide category-level risk scores and explanations.
+
+Evaluate each email according to:
+1. Sender identity and possible impersonation
+2. Subject line
+3. Message body
+4. Urgency or pressure tactics
+5. Requests for passwords, login, payment, MFA codes, or personal data
+6. Social engineering patterns
+7. Suspicious links
+8. Suspicious attachments
+9. Overall phishing or malicious intent
+
+Return ONLY valid JSON in this exact structure:
+
+{{
+  "emails": [
     {{
       "email_index": 0,
-      "summary": "short explanation of the email risk",
+      "summary": "short explanation in one sentence",
       "reasons": [
         "reason 1",
         "reason 2"
@@ -456,107 +707,7 @@ Emails:
 
     response = client.responses.create(
         model="gpt-4.1-mini",
-        input=prompt
-    )
-
-    raw_text = response.output_text
-
-    return parse_llm_json(raw_text)
-
-
-def analyze_single_email_with_llm(email: EmailRequest):
-    prompt = f"""
-You are an email security assistant integrated into Gmail.
-
-Analyze the following email and determine whether it looks safe, suspicious,
-or malicious.
-
-This analysis is used for Manual Email Scan:
-The user explicitly chooses "Scan Current Email" on a specific opened email.
-The result should help the user understand whether the email is risky.
-
-Your job:
-- Identify and explain risk indicators by category.
-- Do NOT calculate the final overall score.
-- Do NOT decide the final verdict.
-- The backend will calculate the final score and verdict using a deterministic
-  weighted formula.
-
-Evaluate the email according to these criteria:
-1. Sender identity and possible impersonation
-2. Subject line
-3. Message body
-4. Urgency or pressure tactics
-5. Requests for passwords, login, payment, verification, MFA codes,
-   or personal data
-6. Social engineering patterns
-7. Suspicious links
-8. Suspicious attachments
-9. Overall phishing or malicious intent
-
-Risk breakdown instructions:
-- Each risk_breakdown category must include:
-  - score: integer from 0 to 10
-  - max_score: always 10
-  - explanation: short explanation for that category score
-- If a category has no meaningful risk indicators, use score 0 and explain
-  that no relevant risk was detected.
-- The category explanations should be clear enough to show in a
-  "View Detailed Breakdown" screen inside the Gmail add-on.
-- Do not exaggerate risk without concrete indicators.
-
-Return ONLY valid JSON in this exact structure:
-
-{{
-  "summary": "short explanation in one sentence",
-  "reasons": [
-    "reason 1",
-    "reason 2"
-  ],
-  "risk_breakdown": {{
-    "sender_risk": {{
-      "score": 0,
-      "max_score": 10,
-      "explanation": "short explanation"
-    }},
-    "content_risk": {{
-      "score": 0,
-      "max_score": 10,
-      "explanation": "short explanation"
-    }},
-    "social_engineering_risk": {{
-      "score": 0,
-      "max_score": 10,
-      "explanation": "short explanation"
-    }},
-    "link_risk": {{
-      "score": 0,
-      "max_score": 10,
-      "explanation": "short explanation"
-    }},
-    "attachment_risk": {{
-      "score": 0,
-      "max_score": 10,
-      "explanation": "short explanation"
-    }}
-  }},
-  "recommended_actions": [
-    "action 1",
-    "action 2"
-  ]
-}}
-
-Email:
-Sender: {email.sender}
-Subject: {email.subject}
-Body: {email.body}
-Links: {email.links}
-Attachments: {email.attachments}
-"""
-
-    response = client.responses.create(
-        model="gpt-4.1-mini",
-        input=prompt
+        input=prompt,
     )
 
     raw_text = response.output_text

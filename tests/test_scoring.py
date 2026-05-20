@@ -119,9 +119,6 @@ def test_batch_report_excludes_score_three():
 def test_batch_report_includes_score_above_three():
     assert should_include_in_batch_report(4, "Low Risk") is True
 
-
-def test_batch_report_includes_suspicious_verdict():
-    assert should_include_in_batch_report(2, "Suspicious") is True
     
 def test_negative_category_scores_are_clamped_to_minimum_score_one():
     risk_breakdown = make_risk_breakdown(
