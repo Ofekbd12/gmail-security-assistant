@@ -27,6 +27,15 @@ app = FastAPI(
 )
 
 
+RISK_WEIGHTS = {
+    "sender_risk": 0.25,
+    "content_risk": 0.20,
+    "social_engineering_risk": 0.20,
+    "link_risk": 0.25,
+    "attachment_risk": 0.10,
+}
+
+
 class EmailRequest(BaseModel):
     sender: str
     subject: str
@@ -100,8 +109,8 @@ def analyze_email(email: EmailRequest):
     """
     try:
         analysis = analyze_single_email_with_llm(email)
-        analysis_with_ui = add_ui_metadata(analysis)
-        return analysis_with_ui
+        analysis_with_score = add_deterministic_scoring_metadata(analysis)
+        return analysis_with_score
 
     except json.JSONDecodeError:
         raise HTTPException(
@@ -137,7 +146,7 @@ def analyze_email_batch(request: BatchEmailScanRequest):
         batch_result = analyze_batch_emails_with_llm(request.emails)
         risky_emails = []
 
-        for item in batch_result.get("risky_emails", []):
+        for item in batch_result.get("analyzed_emails", []):
             email_index = item.get("email_index")
 
             if email_index is None:
@@ -148,13 +157,13 @@ def analyze_email_batch(request: BatchEmailScanRequest):
 
             original_email = request.emails[email_index]
 
-            score = int(item.get("score", 1))
-            verdict = item.get("verdict", "Suspicious")
+            item_with_score = add_deterministic_scoring_metadata(item)
+
+            score = item_with_score["score"]
+            verdict = item_with_score["verdict"]
 
             if not should_include_in_batch_report(score, verdict):
                 continue
-
-            ui_metadata = build_ui_metadata(score, verdict)
 
             risky_emails.append(
                 {
@@ -163,21 +172,21 @@ def analyze_email_batch(request: BatchEmailScanRequest):
                     "subject": original_email.subject,
                     "score": score,
                     "verdict": verdict,
-                    "summary": item.get(
+                    "summary": item_with_score.get(
                         "summary",
                         "This email may require attention."
                     ),
-                    "reasons": item.get(
+                    "reasons": item_with_score.get(
                         "reasons",
                         ["This email matched suspicious risk indicators."]
                     ),
-                    "recommended_actions": item.get(
+                    "recommended_actions": item_with_score.get(
                         "recommended_actions",
                         ["Review this email carefully before taking action."]
                     ),
-                    "should_warn": ui_metadata["should_warn"],
-                    "severity_color": ui_metadata["severity_color"],
-                    "display_label": ui_metadata["display_label"],
+                    "should_warn": item_with_score["should_warn"],
+                    "severity_color": item_with_score["severity_color"],
+                    "display_label": item_with_score["display_label"],
                 }
             )
 
@@ -211,19 +220,82 @@ def should_include_in_batch_report(score: int, verdict: str) -> bool:
     return score > 3 or verdict in risky_verdicts
 
 
-def add_ui_metadata(analysis: dict) -> dict:
+def add_deterministic_scoring_metadata(analysis: dict) -> dict:
     """
-    Adds UI-oriented metadata to the LLM analysis result.
-    """
-    score = analysis.get("score", 1)
-    verdict = analysis.get("verdict", "Safe")
+    Calculates the final score, verdict, and UI metadata deterministically
+    from the per-category risk breakdown.
 
+    The LLM identifies and explains risk indicators.
+    The backend owns the final scoring logic.
+    """
+    risk_breakdown = analysis.get("risk_breakdown")
+
+    if not risk_breakdown:
+        raise ValueError("Missing risk_breakdown in LLM response.")
+
+    score = calculate_final_score_from_breakdown(risk_breakdown)
+    verdict = build_verdict_from_score(score)
     ui_metadata = build_ui_metadata(score, verdict)
 
     return {
         **analysis,
+        "score": score,
+        "verdict": verdict,
         **ui_metadata,
     }
+
+
+def calculate_final_score_from_breakdown(risk_breakdown: dict) -> int:
+    """
+    Weighted final score calculation.
+
+    Final Score =
+    0.25 * Sender Risk
+    + 0.20 * Content Risk
+    + 0.20 * Social Engineering Risk
+    + 0.25 * Link Risk
+    + 0.10 * Attachment Risk
+    """
+    weighted_score = 0.0
+
+    for category_name, weight in RISK_WEIGHTS.items():
+        category = risk_breakdown.get(category_name, {})
+        category_score = category.get("score", 0)
+        category_score = clamp_score(category_score, 0, 10)
+
+        weighted_score += weight * category_score
+
+    final_score = round(weighted_score)
+
+    return clamp_score(final_score, 1, 10)
+
+
+def clamp_score(value: int | float, minimum: int, maximum: int) -> int:
+    """
+    Keeps scores inside the expected range.
+    """
+    try:
+        numeric_value = int(round(float(value)))
+    except (TypeError, ValueError):
+        numeric_value = minimum
+
+    return max(minimum, min(maximum, numeric_value))
+
+
+def build_verdict_from_score(score: int) -> str:
+    """
+    Converts final deterministic score into a verdict.
+    """
+    if score >= 8:
+        return "Malicious"
+
+    if score >= 5:
+        return "Suspicious"
+
+    if score >= 3:
+        return "Low Risk"
+
+    return "Safe"
 
 
 def build_ui_metadata(score: int, verdict: str) -> dict:
@@ -282,7 +354,8 @@ def analyze_batch_emails_with_llm(emails: list[EmailRequest]):
     Lightweight batch analysis for user-selected scan queue.
 
     This function sends all selected emails to the LLM in one call.
-    It asks the LLM to return only emails with score > 3 or meaningful risk.
+    The LLM returns per-category risk scores and explanations.
+    The backend calculates the final score deterministically.
     """
     email_items = []
 
@@ -304,67 +377,77 @@ You are an email security assistant integrated into Gmail.
 You are performing a user-controlled Scan Queue analysis.
 
 The user selected several emails for analysis.
-Your goal is to review the selected emails and return ONLY emails that require
-user attention.
 
-Do not return clearly safe emails.
-
-Minimum inclusion threshold:
-- Include an email only if score > 3.
-- Also include emails with verdict "Suspicious", "High Risk", or "Malicious".
-- Do not include clearly safe emails.
-- Low-risk emails should only be included if they still require user attention.
+Your job:
+- Analyze every selected email.
+- For each email, identify and explain risk indicators by category.
+- Do NOT calculate the final overall score.
+- The backend will calculate the final score using a deterministic weighted formula.
 
 Evaluate each email according to:
 1. Sender identity and possible impersonation
-2. Subject line
-3. Message body
-4. Urgency or pressure tactics
-5. Requests for passwords, login, payment, verification, MFA codes,
+2. Subject line and message content
+3. Urgency or pressure tactics
+4. Requests for passwords, login, payment, verification, MFA codes,
    or personal data
-6. Social engineering patterns
-7. Suspicious links
-8. Suspicious attachments
-9. Overall phishing or malicious intent
+5. Social engineering patterns
+6. Suspicious links
+7. Suspicious attachments
+8. Overall phishing or malicious intent
 
-Scoring instructions:
-- score must be an integer from 1 to 10.
-- 1 means clearly safe.
-- 10 means clearly malicious.
-- Be strict with suspicious links, credential requests, fake domains,
-  and dangerous attachments.
+Risk breakdown instructions:
+- Each risk_breakdown category must include:
+  - score: integer from 0 to 10
+  - max_score: always 10
+  - explanation: short explanation for that category score
+- If a category has no meaningful risk indicators, use score 0 and explain
+  that no relevant risk was detected.
 - Do not exaggerate risk without concrete indicators.
 
 Return ONLY valid JSON in this exact structure:
 
 {{
-  "risky_emails": [
+  "analyzed_emails": [
     {{
       "email_index": 0,
-      "score": 4,
-      "verdict": "Suspicious",
-      "summary": "short explanation of why this email requires attention",
+      "summary": "short explanation of the email risk",
       "reasons": [
         "reason 1",
         "reason 2"
       ],
+      "risk_breakdown": {{
+        "sender_risk": {{
+          "score": 0,
+          "max_score": 10,
+          "explanation": "short explanation"
+        }},
+        "content_risk": {{
+          "score": 0,
+          "max_score": 10,
+          "explanation": "short explanation"
+        }},
+        "social_engineering_risk": {{
+          "score": 0,
+          "max_score": 10,
+          "explanation": "short explanation"
+        }},
+        "link_risk": {{
+          "score": 0,
+          "max_score": 10,
+          "explanation": "short explanation"
+        }},
+        "attachment_risk": {{
+          "score": 0,
+          "max_score": 10,
+          "explanation": "short explanation"
+        }}
+      }},
       "recommended_actions": [
         "action 1",
         "action 2"
       ]
     }}
   ]
-}}
-
-Allowed verdict values:
-- Suspicious
-- High Risk
-- Malicious
-
-If there are no risky emails, return:
-
-{{
-  "risky_emails": []
 }}
 
 Emails:
@@ -392,6 +475,13 @@ This analysis is used for Manual Email Scan:
 The user explicitly chooses "Scan Current Email" on a specific opened email.
 The result should help the user understand whether the email is risky.
 
+Your job:
+- Identify and explain risk indicators by category.
+- Do NOT calculate the final overall score.
+- Do NOT decide the final verdict.
+- The backend will calculate the final score and verdict using a deterministic
+  weighted formula.
+
 Evaluate the email according to these criteria:
 1. Sender identity and possible impersonation
 2. Subject line
@@ -404,16 +494,6 @@ Evaluate the email according to these criteria:
 8. Suspicious attachments
 9. Overall phishing or malicious intent
 
-Scoring instructions:
-- Overall score must be an integer from 1 to 10.
-- 1 means clearly safe.
-- 10 means clearly malicious.
-- Be strict with suspicious links, credential requests, fake domains,
-  and dangerous attachments.
-- Do not exaggerate risk if there are no concrete indicators.
-- The score should be based only on the actual risk indicators
-  found in the email.
-
 Risk breakdown instructions:
 - Each risk_breakdown category must include:
   - score: integer from 0 to 10
@@ -423,12 +503,11 @@ Risk breakdown instructions:
   that no relevant risk was detected.
 - The category explanations should be clear enough to show in a
   "View Detailed Breakdown" screen inside the Gmail add-on.
+- Do not exaggerate risk without concrete indicators.
 
 Return ONLY valid JSON in this exact structure:
 
 {{
-  "score": 1,
-  "verdict": "Safe",
   "summary": "short explanation in one sentence",
   "reasons": [
     "reason 1",
@@ -466,13 +545,6 @@ Return ONLY valid JSON in this exact structure:
     "action 2"
   ]
 }}
-
-Allowed verdict values:
-- Safe
-- Low Risk
-- Suspicious
-- High Risk
-- Malicious
 
 Email:
 Sender: {email.sender}

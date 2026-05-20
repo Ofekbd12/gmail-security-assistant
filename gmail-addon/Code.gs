@@ -21,49 +21,19 @@ function buildHomeCard(e) {
     .setTitle("Gmail Security Assistant")
     .setSubtitle("Analyze selected emails for phishing and malicious signals");
 
-  const section = CardService.newCardSection();
-
-  addSectionTitle(section, "🛡️ Email Security Scan");
-
-  section
-    .addWidget(
-      CardService.newTextParagraph().setText(
-        "Scan the opened email, or add it to a controlled scan queue."
-      )
-    )
-    .addWidget(CardService.newTextParagraph().setText("<br>"))
-    .addWidget(
-      CardService.newTextParagraph().setText(
-        "<b>Scan Queue:</b><br>" +
-          queueCount +
-          "/" +
-          MAX_QUEUE_EMAILS +
-          " emails selected"
-      )
-    )
-    .addWidget(CardService.newTextParagraph().setText("<br>"))
-    .addWidget(
-      CardService.newTextParagraph().setText(
-        "<b>Remaining slots:</b><br>" + remainingSlots
-      )
-    )
-    .addWidget(CardService.newTextParagraph().setText("<br>"));
-
-  addScanInProgressNotice(section);
-
-  section.addWidget(
-    CardService.newTextButton()
-      .setText("Refresh Queue Status")
-      .setTextButtonStyle(CardService.TextButtonStyle.TEXT)
-      .setOnClickAction(
-        CardService.newAction().setFunctionName("onRefreshQueueStatus")
-      )
-  );
-
-  section.addWidget(CardService.newTextParagraph().setText("<br>"));
+  const currentEmailSection = CardService.newCardSection();
+  addSectionTitle(currentEmailSection, "🛡️ Current Email");
 
   if (hasCurrentEmailContext(e)) {
-    section.addWidget(
+    currentEmailSection
+      .addWidget(
+        CardService.newTextParagraph().setText(
+          "Scan this email now, or add it to your scan queue for batch analysis."
+        )
+      )
+      .addWidget(CardService.newTextParagraph().setText("<br>"));
+
+    currentEmailSection.addWidget(
       CardService.newTextButton()
         .setText("Scan Current Email")
         .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
@@ -72,22 +42,45 @@ function buildHomeCard(e) {
         )
     );
 
-    section.addWidget(CardService.newTextParagraph().setText("<br>"));
+    currentEmailSection.addWidget(CardService.newTextParagraph().setText("<br>"));
 
-    section.addWidget(
+    currentEmailSection.addWidget(
       CardService.newTextButton()
-        .setText("Add Email to Scan Queue")
+        .setText("Add to Scan Queue")
         .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
         .setOnClickAction(
           CardService.newAction().setFunctionName("onAddToScanQueue")
         )
     );
-
-    section.addWidget(CardService.newTextParagraph().setText("<br>"));
+  } else {
+    currentEmailSection.addWidget(
+      CardService.newTextParagraph().setText(
+        "Open an email message to scan it or add it to the scan queue."
+      )
+    );
   }
 
+  const queueSection = CardService.newCardSection();
+  addSectionTitle(queueSection, "📋 Scan Queue");
+
+  queueSection
+    .addWidget(
+      CardService.newTextParagraph().setText(
+        "<b>" +
+          queueCount +
+          "/" +
+          MAX_QUEUE_EMAILS +
+          " emails selected</b><br>" +
+          remainingSlots +
+          " slots remaining"
+      )
+    )
+    .addWidget(CardService.newTextParagraph().setText("<br>"));
+
+  addScanInProgressNotice(queueSection);
+
   if (queueCount > 0) {
-    section.addWidget(
+    queueSection.addWidget(
       CardService.newTextButton()
         .setText("Scan Selected Emails")
         .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
@@ -96,9 +89,9 @@ function buildHomeCard(e) {
         )
     );
 
-    section.addWidget(CardService.newTextParagraph().setText("<br>"));
+    queueSection.addWidget(CardService.newTextParagraph().setText("<br>"));
 
-    section.addWidget(
+    queueSection.addWidget(
       CardService.newTextButton()
         .setText("Clear Queue")
         .setTextButtonStyle(CardService.TextButtonStyle.TEXT)
@@ -106,19 +99,23 @@ function buildHomeCard(e) {
           CardService.newAction().setFunctionName("onClearQueue")
         )
     );
+
+    queueSection.addWidget(CardService.newTextParagraph().setText("<br>"));
   }
 
-  if (!hasCurrentEmailContext(e) && queueCount === 0) {
-    section.addWidget(
-      CardService.newTextParagraph().setText(
-        "Open an email message to scan it or add it to the scan queue."
+  queueSection.addWidget(
+    CardService.newTextButton()
+      .setText("Refresh Queue")
+      .setTextButtonStyle(CardService.TextButtonStyle.TEXT)
+      .setOnClickAction(
+        CardService.newAction().setFunctionName("onRefreshQueueStatus")
       )
-    );
-  }
+  );
 
   return CardService.newCardBuilder()
     .setHeader(header)
-    .addSection(section)
+    .addSection(currentEmailSection)
+    .addSection(queueSection)
     .build();
 }
 
@@ -234,40 +231,18 @@ function buildQueueStatusCard(title, message, e) {
     .setTitle(title)
     .setSubtitle("Gmail Security Assistant");
 
-  const section = CardService.newCardSection();
-
-  section
+  const statusSection = CardService.newCardSection()
     .addWidget(
       CardService.newTextParagraph().setText(
         escapeHtml(message)
       )
-    )
-    .addWidget(CardService.newTextParagraph().setText("<br>"));
+    );
 
-  addSectionTitle(section, "🛡️ Scan Queue Status");
-
-  section
-    .addWidget(
-      CardService.newTextParagraph().setText(
-        "<b>Scan Queue:</b><br>" +
-          queueCount +
-          "/" +
-          MAX_QUEUE_EMAILS +
-          " emails selected"
-      )
-    )
-    .addWidget(CardService.newTextParagraph().setText("<br>"))
-    .addWidget(
-      CardService.newTextParagraph().setText(
-        "<b>Remaining slots:</b><br>" + remainingSlots
-      )
-    )
-    .addWidget(CardService.newTextParagraph().setText("<br>"));
-
-  addScanInProgressNotice(section);
+  const currentEmailSection = CardService.newCardSection();
+  addSectionTitle(currentEmailSection, "🛡️ Current Email");
 
   if (hasCurrentEmailContext(e)) {
-    section.addWidget(
+    currentEmailSection.addWidget(
       CardService.newTextButton()
         .setText("Scan Current Email")
         .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
@@ -276,22 +251,45 @@ function buildQueueStatusCard(title, message, e) {
         )
     );
 
-    section.addWidget(CardService.newTextParagraph().setText("<br>"));
+    currentEmailSection.addWidget(CardService.newTextParagraph().setText("<br>"));
 
-    section.addWidget(
+    currentEmailSection.addWidget(
       CardService.newTextButton()
-        .setText("Add Email to Scan Queue")
+        .setText("Add to Scan Queue")
         .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
         .setOnClickAction(
           CardService.newAction().setFunctionName("onAddToScanQueue")
         )
     );
-
-    section.addWidget(CardService.newTextParagraph().setText("<br>"));
+  } else {
+    currentEmailSection.addWidget(
+      CardService.newTextParagraph().setText(
+        "Open an email message to add another email to the queue."
+      )
+    );
   }
 
+  const queueSection = CardService.newCardSection();
+  addSectionTitle(queueSection, "📋 Scan Queue");
+
+  queueSection
+    .addWidget(
+      CardService.newTextParagraph().setText(
+        "<b>" +
+          queueCount +
+          "/" +
+          MAX_QUEUE_EMAILS +
+          " emails selected</b><br>" +
+          remainingSlots +
+          " slots remaining"
+      )
+    )
+    .addWidget(CardService.newTextParagraph().setText("<br>"));
+
+  addScanInProgressNotice(queueSection);
+
   if (queueCount > 0) {
-    section.addWidget(
+    queueSection.addWidget(
       CardService.newTextButton()
         .setText("Scan Selected Emails")
         .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
@@ -300,9 +298,9 @@ function buildQueueStatusCard(title, message, e) {
         )
     );
 
-    section.addWidget(CardService.newTextParagraph().setText("<br>"));
+    queueSection.addWidget(CardService.newTextParagraph().setText("<br>"));
 
-    section.addWidget(
+    queueSection.addWidget(
       CardService.newTextButton()
         .setText("Clear Queue")
         .setTextButtonStyle(CardService.TextButtonStyle.TEXT)
@@ -311,10 +309,10 @@ function buildQueueStatusCard(title, message, e) {
         )
     );
 
-    section.addWidget(CardService.newTextParagraph().setText("<br>"));
+    queueSection.addWidget(CardService.newTextParagraph().setText("<br>"));
   }
 
-  section.addWidget(
+  queueSection.addWidget(
     CardService.newTextButton()
       .setText("Back to Scan Menu")
       .setTextButtonStyle(CardService.TextButtonStyle.TEXT)
@@ -325,7 +323,9 @@ function buildQueueStatusCard(title, message, e) {
 
   return CardService.newCardBuilder()
     .setHeader(header)
-    .addSection(section)
+    .addSection(statusSection)
+    .addSection(currentEmailSection)
+    .addSection(queueSection)
     .build();
 }
 
@@ -345,6 +345,7 @@ function onScanQueue(e) {
 
     saveLastBatchEmails(queuedEmails);
 
+    // Clear the active queue automatically only after a successful batch scan.
     clearScanQueue();
 
     const resultsCard = buildQueueResultsCard(
@@ -482,16 +483,14 @@ function buildQueueResultsCard(batchResult, queuedEmails) {
           severityEmoji +
           " " +
           displayLabel +
-          "</b><br><br>" +
-          "<b>From:</b><br>" +
-          escapeHtml(result.sender) +
-          "<br><br>" +
-          "<b>Subject:</b><br>" +
-          escapeHtml(result.subject) +
-          "<br><br>" +
-          "<b>Risk Score:</b><br>" +
+          " — " +
           result.score +
-          "/10" +
+          "/10</b><br><br>" +
+          "<b>From:</b> " +
+          escapeHtml(result.sender) +
+          "<br>" +
+          "<b>Subject:</b> " +
+          escapeHtml(result.subject) +
           "<br><br>" +
           "<b>Summary:</b><br>" +
           escapeHtml(result.summary)
@@ -860,9 +859,8 @@ function addSectionTitle(section, title) {
 function addScanInProgressNotice(section) {
   section.addWidget(
     CardService.newTextParagraph().setText(
-      "<b>Important:</b><br>" +
-        "Keep this Gmail panel open while scanning. " +
-        "Do not switch emails, refresh Gmail, or close the add-on until the scan is complete."
+      "<b>Important:</b> Keep this panel open while scanning. " +
+        "Do not switch emails or pages until the scan is complete."
     )
   );
 
