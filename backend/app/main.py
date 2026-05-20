@@ -122,7 +122,7 @@ def analyze_email_batch(request: BatchEmailScanRequest):
     User-controlled batch scan flow:
     The user adds selected emails to the scan queue.
     The backend analyzes the selected emails in one LLM call.
-    Only emails with score >= 5, or meaningful suspicious verdicts,
+    Only emails with score > 3, or meaningful suspicious verdicts,
     are returned in the report.
     """
     try:
@@ -204,11 +204,11 @@ def analyze_email_batch(request: BatchEmailScanRequest):
 def should_include_in_batch_report(score: int, verdict: str) -> bool:
     """
     Batch scan should return only emails that require user attention.
-    Minimum inclusion threshold: score >= 5.
+    Minimum inclusion threshold: score > 3.
     """
     risky_verdicts = ["Suspicious", "High Risk", "Malicious"]
 
-    return score >= 5 or verdict in risky_verdicts
+    return score > 3 or verdict in risky_verdicts
 
 
 def add_ui_metadata(analysis: dict) -> dict:
@@ -282,7 +282,7 @@ def analyze_batch_emails_with_llm(emails: list[EmailRequest]):
     Lightweight batch analysis for user-selected scan queue.
 
     This function sends all selected emails to the LLM in one call.
-    It asks the LLM to return only emails with score >= 5 or meaningful risk.
+    It asks the LLM to return only emails with score > 3 or meaningful risk.
     """
     email_items = []
 
@@ -307,13 +307,13 @@ The user selected several emails for analysis.
 Your goal is to review the selected emails and return ONLY emails that require
 user attention.
 
-Do not return clearly safe or low-risk emails.
+Do not return clearly safe emails.
 
 Minimum inclusion threshold:
-- Include an email only if score >= 5.
+- Include an email only if score > 3.
 - Also include emails with verdict "Suspicious", "High Risk", or "Malicious".
-- Do not include Safe or Low Risk emails unless there is a concrete reason
-  the user should review them.
+- Do not include clearly safe emails.
+- Low-risk emails should only be included if they still require user attention.
 
 Evaluate each email according to:
 1. Sender identity and possible impersonation
@@ -341,7 +341,7 @@ Return ONLY valid JSON in this exact structure:
   "risky_emails": [
     {{
       "email_index": 0,
-      "score": 7,
+      "score": 4,
       "verdict": "Suspicious",
       "summary": "short explanation of why this email requires attention",
       "reasons": [

@@ -6,6 +6,7 @@ const BACKEND_BATCH_ANALYZE_URL =
 
 const MAX_QUEUE_EMAILS = 7;
 const QUEUE_IDS_KEY = "scan_queue_ids";
+const LAST_BATCH_EMAIL_PREFIX = "last_batch_email_";
 
 function onGmailMessageOpen(e) {
   return buildHomeCard(e);
@@ -34,10 +35,10 @@ function buildHomeCard(e) {
     .addWidget(
       CardService.newTextParagraph().setText(
         "<b>Scan Queue:</b><br>" +
-        queueCount +
-        "/" +
-        MAX_QUEUE_EMAILS +
-        " emails selected"
+          queueCount +
+          "/" +
+          MAX_QUEUE_EMAILS +
+          " emails selected"
       )
     )
     .addWidget(CardService.newTextParagraph().setText("<br>"))
@@ -48,7 +49,20 @@ function buildHomeCard(e) {
     )
     .addWidget(CardService.newTextParagraph().setText("<br>"));
 
-  if (e && e.gmail && e.gmail.messageId) {
+  addScanInProgressNotice(section);
+
+  section.addWidget(
+    CardService.newTextButton()
+      .setText("Refresh Queue Status")
+      .setTextButtonStyle(CardService.TextButtonStyle.TEXT)
+      .setOnClickAction(
+        CardService.newAction().setFunctionName("onRefreshQueueStatus")
+      )
+  );
+
+  section.addWidget(CardService.newTextParagraph().setText("<br>"));
+
+  if (hasCurrentEmailContext(e)) {
     section.addWidget(
       CardService.newTextButton()
         .setText("Scan Current Email")
@@ -94,7 +108,7 @@ function buildHomeCard(e) {
     );
   }
 
-  if ((!e || !e.gmail || !e.gmail.messageId) && queueCount === 0) {
+  if (!hasCurrentEmailContext(e) && queueCount === 0) {
     section.addWidget(
       CardService.newTextParagraph().setText(
         "Open an email message to scan it or add it to the scan queue."
@@ -105,6 +119,20 @@ function buildHomeCard(e) {
   return CardService.newCardBuilder()
     .setHeader(header)
     .addSection(section)
+    .build();
+}
+
+function onRefreshQueueStatus(e) {
+  const card = buildQueueStatusCard(
+    "Queue Status",
+    "The scan queue status was refreshed.",
+    e
+  );
+
+  return CardService.newActionResponseBuilder()
+    .setNavigation(
+      CardService.newNavigation().updateCard(card)
+    )
     .build();
 }
 
@@ -140,21 +168,33 @@ function onAddToScanQueue(e) {
     const queueIds = getScanQueueIds();
 
     if (queueIds.indexOf(emailData.messageId) !== -1) {
-      return buildActionResponseCard(
+      const card = buildQueueStatusCard(
         "Already in Queue",
         "This email is already included in the scan queue.",
         e
       );
+
+      return CardService.newActionResponseBuilder()
+        .setNavigation(
+          CardService.newNavigation().pushCard(card)
+        )
+        .build();
     }
 
     if (queueIds.length >= MAX_QUEUE_EMAILS) {
-      return buildActionResponseCard(
+      const card = buildQueueStatusCard(
         "Scan Queue Full",
         "You already selected " +
           MAX_QUEUE_EMAILS +
           " emails. Scan or clear the queue before adding more.",
         e
       );
+
+      return CardService.newActionResponseBuilder()
+        .setNavigation(
+          CardService.newNavigation().pushCard(card)
+        )
+        .build();
     }
 
     saveQueuedEmail(emailData);
@@ -162,15 +202,17 @@ function onAddToScanQueue(e) {
     queueIds.push(emailData.messageId);
     saveScanQueueIds(queueIds);
 
-    return buildActionResponseCard(
+    const card = buildQueueStatusCard(
       "Email Added",
-      "This email was added to the scan queue. Queue status: " +
-        queueIds.length +
-        "/" +
-        MAX_QUEUE_EMAILS +
-        ".",
+      "This email was added to the scan queue.",
       e
     );
+
+    return CardService.newActionResponseBuilder()
+      .setNavigation(
+        CardService.newNavigation().pushCard(card)
+      )
+      .build();
 
   } catch (error) {
     const errorCard = buildErrorCard(error);
@@ -181,6 +223,110 @@ function onAddToScanQueue(e) {
       )
       .build();
   }
+}
+
+function buildQueueStatusCard(title, message, e) {
+  const queueIds = getScanQueueIds();
+  const queueCount = queueIds.length;
+  const remainingSlots = MAX_QUEUE_EMAILS - queueCount;
+
+  const header = CardService.newCardHeader()
+    .setTitle(title)
+    .setSubtitle("Gmail Security Assistant");
+
+  const section = CardService.newCardSection();
+
+  section
+    .addWidget(
+      CardService.newTextParagraph().setText(
+        escapeHtml(message)
+      )
+    )
+    .addWidget(CardService.newTextParagraph().setText("<br>"));
+
+  addSectionTitle(section, "🛡️ Scan Queue Status");
+
+  section
+    .addWidget(
+      CardService.newTextParagraph().setText(
+        "<b>Scan Queue:</b><br>" +
+          queueCount +
+          "/" +
+          MAX_QUEUE_EMAILS +
+          " emails selected"
+      )
+    )
+    .addWidget(CardService.newTextParagraph().setText("<br>"))
+    .addWidget(
+      CardService.newTextParagraph().setText(
+        "<b>Remaining slots:</b><br>" + remainingSlots
+      )
+    )
+    .addWidget(CardService.newTextParagraph().setText("<br>"));
+
+  addScanInProgressNotice(section);
+
+  if (hasCurrentEmailContext(e)) {
+    section.addWidget(
+      CardService.newTextButton()
+        .setText("Scan Current Email")
+        .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
+        .setOnClickAction(
+          CardService.newAction().setFunctionName("onScanEmail")
+        )
+    );
+
+    section.addWidget(CardService.newTextParagraph().setText("<br>"));
+
+    section.addWidget(
+      CardService.newTextButton()
+        .setText("Add Email to Scan Queue")
+        .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
+        .setOnClickAction(
+          CardService.newAction().setFunctionName("onAddToScanQueue")
+        )
+    );
+
+    section.addWidget(CardService.newTextParagraph().setText("<br>"));
+  }
+
+  if (queueCount > 0) {
+    section.addWidget(
+      CardService.newTextButton()
+        .setText("Scan Selected Emails")
+        .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
+        .setOnClickAction(
+          CardService.newAction().setFunctionName("onScanQueue")
+        )
+    );
+
+    section.addWidget(CardService.newTextParagraph().setText("<br>"));
+
+    section.addWidget(
+      CardService.newTextButton()
+        .setText("Clear Queue")
+        .setTextButtonStyle(CardService.TextButtonStyle.TEXT)
+        .setOnClickAction(
+          CardService.newAction().setFunctionName("onClearQueue")
+        )
+    );
+
+    section.addWidget(CardService.newTextParagraph().setText("<br>"));
+  }
+
+  section.addWidget(
+    CardService.newTextButton()
+      .setText("Back to Scan Menu")
+      .setTextButtonStyle(CardService.TextButtonStyle.TEXT)
+      .setOnClickAction(
+        CardService.newAction().setFunctionName("onBackToHome")
+      )
+  );
+
+  return CardService.newCardBuilder()
+    .setHeader(header)
+    .addSection(section)
+    .build();
 }
 
 function onScanQueue(e) {
@@ -196,6 +342,10 @@ function onScanQueue(e) {
     }
 
     const batchResult = callBatchAnalyzeEmailBackend(queuedEmails);
+
+    saveLastBatchEmails(queuedEmails);
+
+    clearScanQueue();
 
     const resultsCard = buildQueueResultsCard(
       batchResult,
@@ -222,11 +372,17 @@ function onScanQueue(e) {
 function onClearQueue(e) {
   clearScanQueue();
 
-  return buildActionResponseCard(
+  const card = buildQueueStatusCard(
     "Queue Cleared",
     "The scan queue was cleared successfully.",
     e
   );
+
+  return CardService.newActionResponseBuilder()
+    .setNavigation(
+      CardService.newNavigation().pushCard(card)
+    )
+    .build();
 }
 
 function buildActionResponseCard(title, message, e) {
@@ -286,7 +442,7 @@ function buildQueueResultsCard(batchResult, queuedEmails) {
     section
       .addWidget(
         CardService.newTextParagraph().setText(
-          "No emails with score 5/10 or higher were found in the selected queue."
+          "No emails with score higher than 3/10 were found in the selected queue."
         )
       )
       .addWidget(CardService.newTextParagraph().setText("<br>"))
@@ -295,6 +451,17 @@ function buildQueueResultsCard(batchResult, queuedEmails) {
           "Only emails that require user attention are shown in this report."
         )
       );
+
+    section.addWidget(CardService.newTextParagraph().setText("<br>"));
+
+    section.addWidget(
+      CardService.newTextButton()
+        .setText("Back to Scan Menu")
+        .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
+        .setOnClickAction(
+          CardService.newAction().setFunctionName("onBackToHome")
+        )
+    );
 
     return CardService.newCardBuilder()
       .setHeader(header)
@@ -307,29 +474,27 @@ function buildQueueResultsCard(batchResult, queuedEmails) {
     const severityEmoji = getSeverityEmoji(result.severity_color);
     const displayLabel = String(result.display_label).toUpperCase();
 
-    saveAnalysisToCache(emailData.messageId, result);
-
     section.addWidget(
       CardService.newTextParagraph().setText(
         "<b>" +
-        (index + 1) +
-        ". " +
-        severityEmoji +
-        " " +
-        displayLabel +
-        "</b><br><br>" +
-        "<b>From:</b><br>" +
-        escapeHtml(result.sender) +
-        "<br><br>" +
-        "<b>Subject:</b><br>" +
-        escapeHtml(result.subject) +
-        "<br><br>" +
-        "<b>Risk Score:</b><br>" +
-        result.score +
-        "/10" +
-        "<br><br>" +
-        "<b>Summary:</b><br>" +
-        escapeHtml(result.summary)
+          (index + 1) +
+          ". " +
+          severityEmoji +
+          " " +
+          displayLabel +
+          "</b><br><br>" +
+          "<b>From:</b><br>" +
+          escapeHtml(result.sender) +
+          "<br><br>" +
+          "<b>Subject:</b><br>" +
+          escapeHtml(result.subject) +
+          "<br><br>" +
+          "<b>Risk Score:</b><br>" +
+          result.score +
+          "/10" +
+          "<br><br>" +
+          "<b>Summary:</b><br>" +
+          escapeHtml(result.summary)
       )
     );
 
@@ -351,10 +516,10 @@ function buildQueueResultsCard(batchResult, queuedEmails) {
 
   section.addWidget(
     CardService.newTextButton()
-      .setText("Clear Queue")
-      .setTextButtonStyle(CardService.TextButtonStyle.TEXT)
+      .setText("Back to Scan Menu")
+      .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
       .setOnClickAction(
-        CardService.newAction().setFunctionName("onClearQueue")
+        CardService.newAction().setFunctionName("onBackToHome")
       )
   );
 
@@ -367,10 +532,12 @@ function buildQueueResultsCard(batchResult, queuedEmails) {
 function onRunFullScanFromQueue(e) {
   try {
     const messageId = e.parameters.messageId;
-    const emailData = getQueuedEmailById(messageId);
+    const emailData = getLastBatchEmailById(messageId);
 
     if (!emailData) {
-      throw new Error("Queued email not found. Please add it again.");
+      throw new Error(
+        "Email data not found. Please add this email to the queue again."
+      );
     }
 
     const analysis = callAnalyzeEmailBackend(emailData);
@@ -454,9 +621,9 @@ function callAnalyzeEmailBackend(emailData) {
   if (statusCode < 200 || statusCode >= 300) {
     throw new Error(
       "Backend request failed with status " +
-      statusCode +
-      ": " +
-      responseText
+        statusCode +
+        ": " +
+        responseText
     );
   }
 
@@ -490,9 +657,9 @@ function callBatchAnalyzeEmailBackend(emails) {
   if (statusCode < 200 || statusCode >= 300) {
     throw new Error(
       "Batch backend request failed with status " +
-      statusCode +
-      ": " +
-      responseText
+        statusCode +
+        ": " +
+        responseText
     );
   }
 
@@ -527,10 +694,10 @@ function buildAnalysisSummaryCard(emailData, analysis) {
     .addWidget(
       CardService.newTextParagraph().setText(
         "<b>Verdict:</b><br><b>" +
-        severityEmoji +
-        " " +
-        displayLabel +
-        "</b>"
+          severityEmoji +
+          " " +
+          displayLabel +
+          "</b>"
       )
     )
     .addWidget(CardService.newTextParagraph().setText("<br>"))
@@ -690,6 +857,20 @@ function addSectionTitle(section, title) {
   );
 }
 
+function addScanInProgressNotice(section) {
+  section.addWidget(
+    CardService.newTextParagraph().setText(
+      "<b>Important:</b><br>" +
+        "Keep this Gmail panel open while scanning. " +
+        "Do not switch emails, refresh Gmail, or close the add-on until the scan is complete."
+    )
+  );
+
+  section.addWidget(
+    CardService.newTextParagraph().setText("<br>")
+  );
+}
+
 function saveAnalysisToCache(messageId, analysis) {
   const cache = CacheService.getUserCache();
   const key = "analysis_" + messageId;
@@ -749,17 +930,6 @@ function getQueuedEmails() {
   return emails;
 }
 
-function getQueuedEmailById(messageId) {
-  const properties = PropertiesService.getUserProperties();
-  const rawValue = properties.getProperty(getQueueItemKey(messageId));
-
-  if (!rawValue) {
-    return null;
-  }
-
-  return JSON.parse(rawValue);
-}
-
 function clearScanQueue() {
   const properties = PropertiesService.getUserProperties();
   const queueIds = getScanQueueIds();
@@ -773,6 +943,34 @@ function clearScanQueue() {
 
 function getQueueItemKey(messageId) {
   return "scan_queue_item_" + messageId;
+}
+
+function saveLastBatchEmails(emails) {
+  const properties = PropertiesService.getUserProperties();
+
+  emails.forEach(function (emailData) {
+    properties.setProperty(
+      LAST_BATCH_EMAIL_PREFIX + emailData.messageId,
+      JSON.stringify(emailData)
+    );
+  });
+}
+
+function getLastBatchEmailById(messageId) {
+  const properties = PropertiesService.getUserProperties();
+  const rawValue = properties.getProperty(
+    LAST_BATCH_EMAIL_PREFIX + messageId
+  );
+
+  if (!rawValue) {
+    return null;
+  }
+
+  return JSON.parse(rawValue);
+}
+
+function hasCurrentEmailContext(e) {
+  return Boolean(e && e.gmail && e.gmail.messageId);
 }
 
 function buildErrorCard(error) {
