@@ -20,8 +20,8 @@ client = OpenAI(api_key=api_key)
 app = FastAPI(
     title="Gmail Security Assistant API",
     description=(
-        "Backend service for analyzing suspicious emails "
-        "using LLM-based risk scoring."
+        "Backend service for analyzing a user-selected email "
+        "using LLM-based phishing and malicious-risk scoring."
     ),
     version="1.0.0",
 )
@@ -61,29 +61,6 @@ class EmailAnalysisResponse(BaseModel):
     display_label: str
 
 
-class InitialInboxScanRequest(BaseModel):
-    emails: list[EmailRequest]
-
-
-class SuspiciousEmailSummary(BaseModel):
-    sender: str
-    subject: str
-    score: int
-    verdict: str
-    summary: str
-    recommended_actions: list[str]
-    should_warn: bool
-    severity_color: str
-    display_label: str
-
-
-class InitialInboxScanResponse(BaseModel):
-    suspicious_emails_found: bool
-    total_emails_scanned: int
-    suspicious_emails_count: int
-    suspicious_emails: list[SuspiciousEmailSummary]
-
-
 @app.get("/")
 def home():
     return {"message": "Backend is running"}
@@ -93,8 +70,8 @@ def home():
 def analyze_email(email: EmailRequest):
     """
     Manual scan flow:
-    The user opens a specific email and clicks 'Scan Email'.
-    The backend returns a full risk analysis for that email.
+    The user opens a specific email and clicks 'Scan Current Email'.
+    The backend returns a full risk analysis for that selected email.
     """
     try:
         analysis = analyze_single_email_with_llm(email)
@@ -114,87 +91,14 @@ def analyze_email(email: EmailRequest):
         )
 
 
-@app.post("/initial-inbox-scan", response_model=InitialInboxScanResponse)
-def initial_inbox_scan(request: InitialInboxScanRequest):
-    """
-    Initial inbox scan flow:
-    The system scans recent unread inbox emails and returns only suspicious
-    emails that should appear in the initial security summary report.
-
-    Important:
-    This endpoint uses one batch LLM call for all emails, instead of one LLM
-    call per email. This keeps the Gmail add-on responsive.
-    """
-    try:
-        if not request.emails:
-            return {
-                "suspicious_emails_found": False,
-                "total_emails_scanned": 0,
-                "suspicious_emails_count": 0,
-                "suspicious_emails": [],
-            }
-
-        batch_result = analyze_initial_inbox_batch_with_llm(request.emails)
-        suspicious_emails = []
-
-        for item in batch_result.get("suspicious_emails", []):
-            email_index = item.get("email_index")
-
-            if email_index is None:
-                continue
-
-            if email_index < 0 or email_index >= len(request.emails):
-                continue
-
-            original_email = request.emails[email_index]
-
-            score = int(item.get("score", 1))
-            verdict = item.get("verdict", "Suspicious")
-            ui_metadata = build_ui_metadata(score, verdict)
-
-            suspicious_emails.append(
-                {
-                    "sender": original_email.sender,
-                    "subject": original_email.subject,
-                    "score": score,
-                    "verdict": verdict,
-                    "summary": item.get(
-                        "summary",
-                        "This email may require attention."
-                    ),
-                    "recommended_actions": item.get(
-                        "recommended_actions",
-                        ["Review this email carefully."]
-                    ),
-                    "should_warn": ui_metadata["should_warn"],
-                    "severity_color": ui_metadata["severity_color"],
-                    "display_label": ui_metadata["display_label"],
-                }
-            )
-
-        return {
-            "suspicious_emails_found": len(suspicious_emails) > 0,
-            "total_emails_scanned": len(request.emails),
-            "suspicious_emails_count": len(suspicious_emails),
-            "suspicious_emails": suspicious_emails,
-        }
-
-    except json.JSONDecodeError:
-        raise HTTPException(
-            status_code=500,
-            detail="LLM returned an invalid JSON response."
-        )
-
-    except Exception as error:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Initial inbox scan failed: {str(error)}"
-        )
-
-
 def add_ui_metadata(analysis: dict) -> dict:
     """
     Adds UI-oriented metadata to the LLM analysis result.
+
+    The Gmail add-on uses these fields to decide:
+    - whether to show a warning
+    - which severity color to display
+    - which short label to show to the user
     """
     score = analysis.get("score", 1)
     verdict = analysis.get("verdict", "Safe")
@@ -258,99 +162,6 @@ def parse_llm_json(raw_text: str):
     return json.loads(cleaned_text)
 
 
-def analyze_initial_inbox_batch_with_llm(emails: list[EmailRequest]):
-    """
-    Lightweight batch analysis for the initial inbox scan.
-
-    This function sends all recent unread emails to the LLM in a single call.
-    It asks the LLM to return only suspicious/malicious emails.
-    """
-    email_items = []
-
-    for index, email in enumerate(emails):
-        email_items.append(
-            {
-                "email_index": index,
-                "sender": email.sender,
-                "subject": email.subject,
-                "body": email.body[:1500],
-                "links": email.links,
-                "attachments": email.attachments,
-            }
-        )
-
-    prompt = f"""
-You are an email security assistant integrated into Gmail.
-
-You are performing an Initial Inbox Scan.
-
-The goal is to quickly review a batch of recent unread inbox emails and return
-ONLY the emails that look suspicious, high risk, or malicious.
-
-Do not return safe emails.
-
-Evaluate each email according to:
-1. Sender identity and possible impersonation
-2. Subject line
-3. Message body
-4. Urgency or pressure tactics
-5. Requests for passwords, login, payment, verification, MFA codes,
-   or personal data
-6. Social engineering patterns
-7. Suspicious links
-8. Suspicious attachments
-9. Overall phishing or malicious intent
-
-Scoring instructions:
-- score must be an integer from 1 to 10.
-- 1 means clearly safe.
-- 10 means clearly malicious.
-- Include an email only if it is meaningfully suspicious.
-- Safe or normal emails must not be included in the output.
-- Be strict, but do not exaggerate risk without concrete indicators.
-
-Return ONLY valid JSON in this exact structure:
-
-{{
-  "suspicious_emails": [
-    {{
-      "email_index": 0,
-      "score": 8,
-      "verdict": "Suspicious",
-      "summary": "short explanation of why this email is risky",
-      "recommended_actions": [
-        "action 1",
-        "action 2"
-      ]
-    }}
-  ]
-}}
-
-Allowed verdict values:
-- Suspicious
-- High Risk
-- Malicious
-
-If there are no suspicious emails, return:
-
-{{
-  "suspicious_emails": []
-}}
-
-Emails:
-{json.dumps(email_items, ensure_ascii=False)}
-"""
-
-    response = client.responses.create(
-        model="gpt-4.1-mini",
-        input=prompt
-    )
-
-    raw_text = response.output_text
-
-    return parse_llm_json(raw_text)
-
-
 def analyze_single_email_with_llm(email: EmailRequest):
     prompt = f"""
 You are an email security assistant integrated into Gmail.
@@ -359,7 +170,7 @@ Analyze the following email and determine whether it looks safe, suspicious,
 or malicious.
 
 This analysis is used for Manual Email Scan:
-The user explicitly chooses "Scan Email" on a specific opened email.
+The user explicitly chooses "Scan Current Email" on a specific opened email.
 The result should help the user understand whether the email is risky.
 
 Evaluate the email according to these criteria:
@@ -392,7 +203,7 @@ Risk breakdown instructions:
 - If a category has no meaningful risk indicators, use score 0 and explain
   that no relevant risk was detected.
 - The category explanations should be clear enough to show in a
-  "View Details" screen inside the Gmail add-on.
+  "View Detailed Breakdown" screen inside the Gmail add-on.
 
 Return ONLY valid JSON in this exact structure:
 
