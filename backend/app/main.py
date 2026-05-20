@@ -35,12 +35,18 @@ class EmailRequest(BaseModel):
     attachments: list[str] = []
 
 
+class RiskCategory(BaseModel):
+    score: int
+    max_score: int
+    explanation: str
+
+
 class RiskBreakdown(BaseModel):
-    sender_risk: int
-    content_risk: int
-    social_engineering_risk: int
-    link_risk: int
-    attachment_risk: int
+    sender_risk: RiskCategory
+    content_risk: RiskCategory
+    social_engineering_risk: RiskCategory
+    link_risk: RiskCategory
+    attachment_risk: RiskCategory
 
 
 class EmailAnalysisResponse(BaseModel):
@@ -279,7 +285,7 @@ Evaluate the email according to these criteria:
 9. Overall phishing or malicious intent
 
 Scoring instructions:
-- Score must be an integer from 1 to 10.
+- Overall score must be an integer from 1 to 10.
 - 1 means clearly safe.
 - 10 means clearly malicious.
 - Be strict with suspicious links, credential requests, fake domains,
@@ -287,6 +293,16 @@ Scoring instructions:
 - Do not exaggerate risk if there are no concrete indicators.
 - The score should be based only on the actual risk indicators
   found in the email.
+
+Risk breakdown instructions:
+- Each risk_breakdown category must include:
+  - score: integer from 0 to 10
+  - max_score: always 10
+  - explanation: short explanation for that category score
+- If a category has no meaningful risk indicators, use score 0 and explain
+  that no relevant risk was detected.
+- The category explanations should be clear enough to show in a
+  "View Details" screen inside the Gmail add-on.
 
 Return ONLY valid JSON in this exact structure:
 
@@ -299,11 +315,31 @@ Return ONLY valid JSON in this exact structure:
     "reason 2"
   ],
   "risk_breakdown": {{
-    "sender_risk": 0,
-    "content_risk": 0,
-    "social_engineering_risk": 0,
-    "link_risk": 0,
-    "attachment_risk": 0
+    "sender_risk": {{
+      "score": 0,
+      "max_score": 10,
+      "explanation": "short explanation"
+    }},
+    "content_risk": {{
+      "score": 0,
+      "max_score": 10,
+      "explanation": "short explanation"
+    }},
+    "social_engineering_risk": {{
+      "score": 0,
+      "max_score": 10,
+      "explanation": "short explanation"
+    }},
+    "link_risk": {{
+      "score": 0,
+      "max_score": 10,
+      "explanation": "short explanation"
+    }},
+    "attachment_risk": {{
+      "score": 0,
+      "max_score": 10,
+      "explanation": "short explanation"
+    }}
   }},
   "recommended_actions": [
     "action 1",
