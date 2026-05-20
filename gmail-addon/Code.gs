@@ -1,18 +1,22 @@
 const BACKEND_ANALYZE_URL =
-  "https://gmail-security-assistant.onrender.com/analyze-email";
+  "https://gmail-security-assistant-docker.onrender.com/analyze-email";
 
 const BACKEND_BATCH_ANALYZE_URL =
-  "https://gmail-security-assistant.onrender.com/analyze-email-batch";
+  "https://gmail-security-assistant-docker.onrender.com/analyze-email-batch";
 
 const MAX_QUEUE_EMAILS = 7;
 const QUEUE_IDS_KEY = "scan_queue_ids";
+const QUEUE_ITEM_PREFIX = "scan_queue_item_";
 const LAST_BATCH_EMAIL_PREFIX = "last_batch_email_";
+const QUEUE_RESET_AFTER_SCAN_KEY = "queue_reset_after_scan";
 
 function onGmailMessageOpen(e) {
   return buildHomeCard(e);
 }
 
 function buildHomeCard(e) {
+  applyQueueResetAfterScanIfNeeded();
+
   const queueIds = getScanQueueIds();
   const queueCount = queueIds.length;
   const remainingSlots = MAX_QUEUE_EMAILS - queueCount;
@@ -42,7 +46,9 @@ function buildHomeCard(e) {
         )
     );
 
-    currentEmailSection.addWidget(CardService.newTextParagraph().setText("<br>"));
+    currentEmailSection.addWidget(
+      CardService.newTextParagraph().setText("<br>")
+    );
 
     currentEmailSection.addWidget(
       CardService.newTextButton()
@@ -120,6 +126,8 @@ function buildHomeCard(e) {
 }
 
 function onRefreshQueueStatus(e) {
+  applyQueueResetAfterScanIfNeeded();
+
   const card = buildQueueStatusCard(
     "Queue Status",
     "The scan queue status was refreshed.",
@@ -127,9 +135,7 @@ function onRefreshQueueStatus(e) {
   );
 
   return CardService.newActionResponseBuilder()
-    .setNavigation(
-      CardService.newNavigation().updateCard(card)
-    )
+    .setNavigation(CardService.newNavigation().updateCard(card))
     .build();
 }
 
@@ -143,24 +149,21 @@ function onScanEmail(e) {
     const resultCard = buildAnalysisSummaryCard(emailData, analysis);
 
     return CardService.newActionResponseBuilder()
-      .setNavigation(
-        CardService.newNavigation().pushCard(resultCard)
-      )
+      .setNavigation(CardService.newNavigation().pushCard(resultCard))
       .build();
-
   } catch (error) {
     const errorCard = buildErrorCard(error);
 
     return CardService.newActionResponseBuilder()
-      .setNavigation(
-        CardService.newNavigation().pushCard(errorCard)
-      )
+      .setNavigation(CardService.newNavigation().pushCard(errorCard))
       .build();
   }
 }
 
 function onAddToScanQueue(e) {
   try {
+    clearQueueResetAfterScanFlag();
+
     const emailData = getCurrentEmailData(e);
     const queueIds = getScanQueueIds();
 
@@ -172,9 +175,7 @@ function onAddToScanQueue(e) {
       );
 
       return CardService.newActionResponseBuilder()
-        .setNavigation(
-          CardService.newNavigation().pushCard(card)
-        )
+        .setNavigation(CardService.newNavigation().pushCard(card))
         .build();
     }
 
@@ -188,9 +189,7 @@ function onAddToScanQueue(e) {
       );
 
       return CardService.newActionResponseBuilder()
-        .setNavigation(
-          CardService.newNavigation().pushCard(card)
-        )
+        .setNavigation(CardService.newNavigation().pushCard(card))
         .build();
     }
 
@@ -206,23 +205,20 @@ function onAddToScanQueue(e) {
     );
 
     return CardService.newActionResponseBuilder()
-      .setNavigation(
-        CardService.newNavigation().pushCard(card)
-      )
+      .setNavigation(CardService.newNavigation().pushCard(card))
       .build();
-
   } catch (error) {
     const errorCard = buildErrorCard(error);
 
     return CardService.newActionResponseBuilder()
-      .setNavigation(
-        CardService.newNavigation().pushCard(errorCard)
-      )
+      .setNavigation(CardService.newNavigation().pushCard(errorCard))
       .build();
   }
 }
 
 function buildQueueStatusCard(title, message, e) {
+  applyQueueResetAfterScanIfNeeded();
+
   const queueIds = getScanQueueIds();
   const queueCount = queueIds.length;
   const remainingSlots = MAX_QUEUE_EMAILS - queueCount;
@@ -231,12 +227,9 @@ function buildQueueStatusCard(title, message, e) {
     .setTitle(title)
     .setSubtitle("Gmail Security Assistant");
 
-  const statusSection = CardService.newCardSection()
-    .addWidget(
-      CardService.newTextParagraph().setText(
-        escapeHtml(message)
-      )
-    );
+  const statusSection = CardService.newCardSection().addWidget(
+    CardService.newTextParagraph().setText(escapeHtml(message))
+  );
 
   const currentEmailSection = CardService.newCardSection();
   addSectionTitle(currentEmailSection, "🛡️ Current Email");
@@ -251,7 +244,9 @@ function buildQueueStatusCard(title, message, e) {
         )
     );
 
-    currentEmailSection.addWidget(CardService.newTextParagraph().setText("<br>"));
+    currentEmailSection.addWidget(
+      CardService.newTextParagraph().setText("<br>")
+    );
 
     currentEmailSection.addWidget(
       CardService.newTextButton()
@@ -334,6 +329,8 @@ function onScanQueue(e) {
     const queuedEmails = getQueuedEmails();
 
     if (queuedEmails.length === 0) {
+      clearScanQueue();
+
       return buildActionResponseCard(
         "Scan Queue Empty",
         "No emails were selected for batch scanning.",
@@ -345,33 +342,26 @@ function onScanQueue(e) {
 
     saveLastBatchEmails(queuedEmails);
 
-    // Clear the active queue automatically only after a successful batch scan.
     clearScanQueue();
+    setQueueResetAfterScanFlag();
 
-    const resultsCard = buildQueueResultsCard(
-      batchResult,
-      queuedEmails
-    );
+    const resultsCard = buildQueueResultsCard(batchResult, queuedEmails);
 
     return CardService.newActionResponseBuilder()
-      .setNavigation(
-        CardService.newNavigation().pushCard(resultsCard)
-      )
+      .setNavigation(CardService.newNavigation().pushCard(resultsCard))
       .build();
-
   } catch (error) {
     const errorCard = buildErrorCard(error);
 
     return CardService.newActionResponseBuilder()
-      .setNavigation(
-        CardService.newNavigation().pushCard(errorCard)
-      )
+      .setNavigation(CardService.newNavigation().pushCard(errorCard))
       .build();
   }
 }
 
 function onClearQueue(e) {
   clearScanQueue();
+  clearQueueResetAfterScanFlag();
 
   const card = buildQueueStatusCard(
     "Queue Cleared",
@@ -380,18 +370,14 @@ function onClearQueue(e) {
   );
 
   return CardService.newActionResponseBuilder()
-    .setNavigation(
-      CardService.newNavigation().pushCard(card)
-    )
+    .setNavigation(CardService.newNavigation().pushCard(card))
     .build();
 }
 
 function buildActionResponseCard(title, message, e) {
   const section = CardService.newCardSection()
     .addWidget(
-      CardService.newTextParagraph().setText(
-        escapeHtml(message)
-      )
+      CardService.newTextParagraph().setText(escapeHtml(message))
     )
     .addWidget(CardService.newTextParagraph().setText("<br>"));
 
@@ -414,19 +400,17 @@ function buildActionResponseCard(title, message, e) {
     .build();
 
   return CardService.newActionResponseBuilder()
-    .setNavigation(
-      CardService.newNavigation().pushCard(card)
-    )
+    .setNavigation(CardService.newNavigation().pushCard(card))
     .build();
 }
 
 function onBackToHome(e) {
+  applyQueueResetAfterScanIfNeeded();
+
   const card = buildHomeCard(e);
 
   return CardService.newActionResponseBuilder()
-    .setNavigation(
-      CardService.newNavigation().pushCard(card)
-    )
+    .setNavigation(CardService.newNavigation().updateCard(card))
     .build();
 }
 
@@ -505,7 +489,7 @@ function buildQueueResultsCard(batchResult, queuedEmails) {
           CardService.newAction()
             .setFunctionName("onRunFullScanFromQueue")
             .setParameters({
-              messageId: emailData.messageId
+              messageId: emailData.messageId,
             })
         )
     );
@@ -545,18 +529,13 @@ function onRunFullScanFromQueue(e) {
     const resultCard = buildAnalysisSummaryCard(emailData, analysis);
 
     return CardService.newActionResponseBuilder()
-      .setNavigation(
-        CardService.newNavigation().pushCard(resultCard)
-      )
+      .setNavigation(CardService.newNavigation().pushCard(resultCard))
       .build();
-
   } catch (error) {
     const errorCard = buildErrorCard(error);
 
     return CardService.newActionResponseBuilder()
-      .setNavigation(
-        CardService.newNavigation().pushCard(errorCard)
-      )
+      .setNavigation(CardService.newNavigation().pushCard(errorCard))
       .build();
   }
 }
@@ -582,7 +561,7 @@ function getCurrentEmailData(e) {
     subject: subject,
     body: body.substring(0, 3000),
     links: links,
-    attachments: attachments
+    attachments: attachments,
   };
 }
 
@@ -603,14 +582,14 @@ function callAnalyzeEmailBackend(emailData) {
     subject: emailData.subject,
     body: emailData.body,
     links: emailData.links,
-    attachments: emailData.attachments
+    attachments: emailData.attachments,
   };
 
   const options = {
     method: "post",
     contentType: "application/json",
     payload: JSON.stringify(payload),
-    muteHttpExceptions: true
+    muteHttpExceptions: true,
   };
 
   const response = UrlFetchApp.fetch(BACKEND_ANALYZE_URL, options);
@@ -637,16 +616,16 @@ function callBatchAnalyzeEmailBackend(emails) {
         subject: email.subject,
         body: email.body,
         links: email.links,
-        attachments: email.attachments
+        attachments: email.attachments,
       };
-    })
+    }),
   };
 
   const options = {
     method: "post",
     contentType: "application/json",
     payload: JSON.stringify(payload),
-    muteHttpExceptions: true
+    muteHttpExceptions: true,
   };
 
   const response = UrlFetchApp.fetch(BACKEND_BATCH_ANALYZE_URL, options);
@@ -712,14 +691,10 @@ function buildAnalysisSummaryCard(emailData, analysis) {
 
   analysis.reasons.forEach(function (reason) {
     reasonsSection.addWidget(
-      CardService.newTextParagraph().setText(
-        "• " + escapeHtml(reason)
-      )
+      CardService.newTextParagraph().setText("• " + escapeHtml(reason))
     );
 
-    reasonsSection.addWidget(
-      CardService.newTextParagraph().setText("<br>")
-    );
+    reasonsSection.addWidget(CardService.newTextParagraph().setText("<br>"));
   });
 
   const actionsSection = CardService.newCardSection();
@@ -728,14 +703,10 @@ function buildAnalysisSummaryCard(emailData, analysis) {
 
   analysis.recommended_actions.forEach(function (action) {
     actionsSection.addWidget(
-      CardService.newTextParagraph().setText(
-        "• " + escapeHtml(action)
-      )
+      CardService.newTextParagraph().setText("• " + escapeHtml(action))
     );
 
-    actionsSection.addWidget(
-      CardService.newTextParagraph().setText("<br>")
-    );
+    actionsSection.addWidget(CardService.newTextParagraph().setText("<br>"));
   });
 
   const detailsButton = CardService.newTextButton()
@@ -745,12 +716,11 @@ function buildAnalysisSummaryCard(emailData, analysis) {
       CardService.newAction()
         .setFunctionName("onViewDetails")
         .setParameters({
-          messageId: emailData.messageId
+          messageId: emailData.messageId,
         })
     );
 
-  const footerSection = CardService.newCardSection()
-    .addWidget(detailsButton);
+  const footerSection = CardService.newCardSection().addWidget(detailsButton);
 
   return CardService.newCardBuilder()
     .setHeader(header)
@@ -775,18 +745,13 @@ function onViewDetails(e) {
     const detailsCard = buildDetailsCard(analysis);
 
     return CardService.newActionResponseBuilder()
-      .setNavigation(
-        CardService.newNavigation().pushCard(detailsCard)
-      )
+      .setNavigation(CardService.newNavigation().pushCard(detailsCard))
       .build();
-
   } catch (error) {
     const errorCard = buildErrorCard(error);
 
     return CardService.newActionResponseBuilder()
-      .setNavigation(
-        CardService.newNavigation().pushCard(errorCard)
-      )
+      .setNavigation(CardService.newNavigation().pushCard(errorCard))
       .build();
   }
 }
@@ -851,9 +816,7 @@ function addSectionTitle(section, title) {
     )
   );
 
-  section.addWidget(
-    CardService.newTextParagraph().setText("<br>")
-  );
+  section.addWidget(CardService.newTextParagraph().setText("<br>"));
 }
 
 function addScanInProgressNotice(section) {
@@ -864,9 +827,7 @@ function addScanInProgressNotice(section) {
     )
   );
 
-  section.addWidget(
-    CardService.newTextParagraph().setText("<br>")
-  );
+  section.addWidget(CardService.newTextParagraph().setText("<br>"));
 }
 
 function saveAnalysisToCache(messageId, analysis) {
@@ -896,7 +857,24 @@ function getScanQueueIds() {
     return [];
   }
 
-  return JSON.parse(rawValue);
+  let queueIds = [];
+
+  try {
+    queueIds = JSON.parse(rawValue);
+  } catch (error) {
+    properties.setProperty(QUEUE_IDS_KEY, JSON.stringify([]));
+    return [];
+  }
+
+  const validQueueIds = queueIds.filter(function (messageId) {
+    return properties.getProperty(getQueueItemKey(messageId)) !== null;
+  });
+
+  if (validQueueIds.length !== queueIds.length) {
+    properties.setProperty(QUEUE_IDS_KEY, JSON.stringify(validQueueIds));
+  }
+
+  return validQueueIds;
 }
 
 function saveScanQueueIds(queueIds) {
@@ -930,17 +908,39 @@ function getQueuedEmails() {
 
 function clearScanQueue() {
   const properties = PropertiesService.getUserProperties();
-  const queueIds = getScanQueueIds();
+  const allProperties = properties.getProperties();
 
-  queueIds.forEach(function (messageId) {
-    properties.deleteProperty(getQueueItemKey(messageId));
+  Object.keys(allProperties).forEach(function (key) {
+    if (key === QUEUE_IDS_KEY || key.indexOf(QUEUE_ITEM_PREFIX) === 0) {
+      properties.deleteProperty(key);
+    }
   });
 
-  properties.deleteProperty(QUEUE_IDS_KEY);
+  properties.setProperty(QUEUE_IDS_KEY, JSON.stringify([]));
 }
 
 function getQueueItemKey(messageId) {
-  return "scan_queue_item_" + messageId;
+  return QUEUE_ITEM_PREFIX + messageId;
+}
+
+function setQueueResetAfterScanFlag() {
+  const properties = PropertiesService.getUserProperties();
+  properties.setProperty(QUEUE_RESET_AFTER_SCAN_KEY, "true");
+}
+
+function clearQueueResetAfterScanFlag() {
+  const properties = PropertiesService.getUserProperties();
+  properties.deleteProperty(QUEUE_RESET_AFTER_SCAN_KEY);
+}
+
+function applyQueueResetAfterScanIfNeeded() {
+  const properties = PropertiesService.getUserProperties();
+  const shouldReset = properties.getProperty(QUEUE_RESET_AFTER_SCAN_KEY);
+
+  if (shouldReset === "true") {
+    clearScanQueue();
+    clearQueueResetAfterScanFlag();
+  }
 }
 
 function saveLastBatchEmails(emails) {
@@ -956,9 +956,7 @@ function saveLastBatchEmails(emails) {
 
 function getLastBatchEmailById(messageId) {
   const properties = PropertiesService.getUserProperties();
-  const rawValue = properties.getProperty(
-    LAST_BATCH_EMAIL_PREFIX + messageId
-  );
+  const rawValue = properties.getProperty(LAST_BATCH_EMAIL_PREFIX + messageId);
 
   if (!rawValue) {
     return null;
