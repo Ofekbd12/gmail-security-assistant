@@ -118,33 +118,59 @@ def analyze_email(email: EmailRequest):
 def initial_inbox_scan(request: InitialInboxScanRequest):
     """
     Initial inbox scan flow:
-    When the user opens the Gmail add-on, the system scans recent,
-    unread, or newly received emails and returns only risky emails
-    that should appear in the initial security summary report.
+    The system scans recent unread inbox emails and returns only suspicious
+    emails that should appear in the initial security summary report.
+
+    Important:
+    This endpoint uses one batch LLM call for all emails, instead of one LLM
+    call per email. This keeps the Gmail add-on responsive.
     """
     try:
+        if not request.emails:
+            return {
+                "suspicious_emails_found": False,
+                "total_emails_scanned": 0,
+                "suspicious_emails_count": 0,
+                "suspicious_emails": [],
+            }
+
+        batch_result = analyze_initial_inbox_batch_with_llm(request.emails)
         suspicious_emails = []
 
-        for email in request.emails:
-            analysis = analyze_single_email_with_llm(email)
-            analysis_with_ui = add_ui_metadata(analysis)
+        for item in batch_result.get("suspicious_emails", []):
+            email_index = item.get("email_index")
 
-            if should_include_in_security_report(analysis_with_ui):
-                suspicious_emails.append(
-                    {
-                        "sender": email.sender,
-                        "subject": email.subject,
-                        "score": analysis_with_ui["score"],
-                        "verdict": analysis_with_ui["verdict"],
-                        "summary": analysis_with_ui["summary"],
-                        "recommended_actions": analysis_with_ui[
-                            "recommended_actions"
-                        ],
-                        "should_warn": analysis_with_ui["should_warn"],
-                        "severity_color": analysis_with_ui["severity_color"],
-                        "display_label": analysis_with_ui["display_label"],
-                    }
-                )
+            if email_index is None:
+                continue
+
+            if email_index < 0 or email_index >= len(request.emails):
+                continue
+
+            original_email = request.emails[email_index]
+
+            score = int(item.get("score", 1))
+            verdict = item.get("verdict", "Suspicious")
+            ui_metadata = build_ui_metadata(score, verdict)
+
+            suspicious_emails.append(
+                {
+                    "sender": original_email.sender,
+                    "subject": original_email.subject,
+                    "score": score,
+                    "verdict": verdict,
+                    "summary": item.get(
+                        "summary",
+                        "This email may require attention."
+                    ),
+                    "recommended_actions": item.get(
+                        "recommended_actions",
+                        ["Review this email carefully."]
+                    ),
+                    "should_warn": ui_metadata["should_warn"],
+                    "severity_color": ui_metadata["severity_color"],
+                    "display_label": ui_metadata["display_label"],
+                }
+            )
 
         return {
             "suspicious_emails_found": len(suspicious_emails) > 0,
@@ -166,28 +192,9 @@ def initial_inbox_scan(request: InitialInboxScanRequest):
         )
 
 
-def should_include_in_security_report(analysis: dict) -> bool:
-    """
-    Decides whether an email should appear in the initial warning report.
-    This keeps the initial report focused only on meaningful risks.
-    """
-    score = analysis.get("score", 1)
-    verdict = analysis.get("verdict", "Safe")
-    should_warn = analysis.get("should_warn", False)
-
-    risky_verdicts = ["Suspicious", "High Risk", "Malicious"]
-
-    return should_warn or score >= 5 or verdict in risky_verdicts
-
-
 def add_ui_metadata(analysis: dict) -> dict:
     """
     Adds UI-oriented metadata to the LLM analysis result.
-
-    The Gmail add-on can use these fields to decide:
-    - whether to show a warning
-    - which severity color to display
-    - which short label to show to the user
     """
     score = analysis.get("score", 1)
     verdict = analysis.get("verdict", "Safe")
@@ -235,13 +242,7 @@ def build_ui_metadata(score: int, verdict: str) -> dict:
 def parse_llm_json(raw_text: str):
     """
     Converts the LLM response into JSON.
-
-    Sometimes the LLM may wrap the JSON in markdown, for example:
-    ```json
-    { ... }
-    ```
-
-    This function removes that wrapping before parsing.
+    Removes markdown wrapping if needed.
     """
     cleaned_text = raw_text.strip()
 
@@ -257,6 +258,99 @@ def parse_llm_json(raw_text: str):
     return json.loads(cleaned_text)
 
 
+def analyze_initial_inbox_batch_with_llm(emails: list[EmailRequest]):
+    """
+    Lightweight batch analysis for the initial inbox scan.
+
+    This function sends all recent unread emails to the LLM in a single call.
+    It asks the LLM to return only suspicious/malicious emails.
+    """
+    email_items = []
+
+    for index, email in enumerate(emails):
+        email_items.append(
+            {
+                "email_index": index,
+                "sender": email.sender,
+                "subject": email.subject,
+                "body": email.body[:1500],
+                "links": email.links,
+                "attachments": email.attachments,
+            }
+        )
+
+    prompt = f"""
+You are an email security assistant integrated into Gmail.
+
+You are performing an Initial Inbox Scan.
+
+The goal is to quickly review a batch of recent unread inbox emails and return
+ONLY the emails that look suspicious, high risk, or malicious.
+
+Do not return safe emails.
+
+Evaluate each email according to:
+1. Sender identity and possible impersonation
+2. Subject line
+3. Message body
+4. Urgency or pressure tactics
+5. Requests for passwords, login, payment, verification, MFA codes,
+   or personal data
+6. Social engineering patterns
+7. Suspicious links
+8. Suspicious attachments
+9. Overall phishing or malicious intent
+
+Scoring instructions:
+- score must be an integer from 1 to 10.
+- 1 means clearly safe.
+- 10 means clearly malicious.
+- Include an email only if it is meaningfully suspicious.
+- Safe or normal emails must not be included in the output.
+- Be strict, but do not exaggerate risk without concrete indicators.
+
+Return ONLY valid JSON in this exact structure:
+
+{{
+  "suspicious_emails": [
+    {{
+      "email_index": 0,
+      "score": 8,
+      "verdict": "Suspicious",
+      "summary": "short explanation of why this email is risky",
+      "recommended_actions": [
+        "action 1",
+        "action 2"
+      ]
+    }}
+  ]
+}}
+
+Allowed verdict values:
+- Suspicious
+- High Risk
+- Malicious
+
+If there are no suspicious emails, return:
+
+{{
+  "suspicious_emails": []
+}}
+
+Emails:
+{json.dumps(email_items, ensure_ascii=False)}
+"""
+
+    response = client.responses.create(
+        model="gpt-4.1-mini",
+        input=prompt
+    )
+
+    raw_text = response.output_text
+
+    return parse_llm_json(raw_text)
+
+
 def analyze_single_email_with_llm(email: EmailRequest):
     prompt = f"""
 You are an email security assistant integrated into Gmail.
@@ -264,13 +358,9 @@ You are an email security assistant integrated into Gmail.
 Analyze the following email and determine whether it looks safe, suspicious,
 or malicious.
 
-This analysis may be used in two product flows:
-1. Initial Inbox Scan:
-   The system scans recent, unread, or newly received emails when the user
-   opens the Gmail add-on. Risky emails should appear in a security summary.
-2. Manual Email Scan:
-   The user explicitly chooses "Scan Email" on a specific opened email.
-   The result should help the user understand whether the email is risky.
+This analysis is used for Manual Email Scan:
+The user explicitly chooses "Scan Email" on a specific opened email.
+The result should help the user understand whether the email is risky.
 
 Evaluate the email according to these criteria:
 1. Sender identity and possible impersonation

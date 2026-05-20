@@ -4,8 +4,11 @@
   "exceptionLogging": "STACKDRIVER",
   "runtimeVersion": "V8",
   "oauthScopes": [
+    "https://www.googleapis.com/auth/gmail.addons.execute",
     "https://www.googleapis.com/auth/gmail.addons.current.message.readonly",
-    "https://www.googleapis.com/auth/script.external_request"
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/script.external_request",
+    "https://www.googleapis.com/auth/script.storage"
   ],
   "addOns": {
     "common": {
@@ -13,6 +16,9 @@
       "logoUrl": "https://www.gstatic.com/images/icons/material/system/2x/security_black_24dp.png",
       "layoutProperties": {
         "primaryColor": "#D93025"
+      },
+      "homepageTrigger": {
+        "runFunction": "buildHomeCard"
       }
     },
     "gmail": {
