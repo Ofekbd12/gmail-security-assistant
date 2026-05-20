@@ -12,14 +12,12 @@ Users often need to decide whether an email is trustworthy while they are alread
 Gmail Security Assistant provides an on-demand security assistant inside Gmail.
 
 ---
-
 ## System Showcase
 
 | Add-on Home Interface | Opened Email Interface |
 | :---: | :---: |
 | Initial Gmail Security Assistant interface inside Gmail. | Add-on interface when a specific email is opened. |
-| <img src="screenshots/Security_Assistant_Home_Interface.png" width="380"> | <img src="screenshots/Security_Assistant_Mail_Page.png" width="380"> |
-
+| <img src="screenshots/home-interface.png" width="420"> | <img src="screenshots/mail-page.png" width="420"> |
 ---
 
 ## Demo Videos
@@ -51,77 +49,55 @@ Gmail Security Assistant provides an on-demand security assistant inside Gmail.
 
 - **Backend Tests:** The project includes pytest tests for deterministic scoring, verdict mapping, batch threshold logic, missing risk categories, negative scores, and score clamping.
 
+- **Backend Logging:** Structured backend logs were added to support debugging and failure diagnosis through Render logs when needed.
+
 ---
 
 ## System Flowchart
 
-
----
-
-The diagram below shows the main flow of the Gmail Security Assistant, including both the single-email analysis flow and the Scan Queue batch flow.
+The diagram below shows the main system flow for both single-email analysis and Scan Queue batch analysis.
 
 ```mermaid
-flowchart LR
+flowchart TB
 
-    %% Gmail / User Entry
-    subgraph GMAIL["📩 Gmail Interface"]
-        A([User opens Gmail])
-        B[Open Gmail Security Assistant Add-on]
-        C{{Choose action}}
-        A --> B --> C
-    end
+    A([User opens Gmail]) --> B[Open Gmail Security Assistant]
+    B --> C{Choose action}
 
-    %% Single Email Scan
-    subgraph SINGLE["🔎 Single Email Scan"]
-        D[Scan Current Email]
-        E[Apps Script extracts current email data]
-        F[Send request to FastAPI backend]
-        G[LLM analyzes the email]
-        H[Backend calculates deterministic final score]
-        I[Return verdict, score, reasons, and actions]
-        J[Display Email Risk Summary]
-        K{{View detailed breakdown?}}
-        L[Show Detailed Risk Breakdown]
-        M([End])
+    C -->|Scan current email| D[Extract current email data]
+    D --> E[FastAPI backend]
+    E --> F[LLM risk analysis]
+    F --> G[Deterministic scoring]
+    G --> H[Return score, verdict and reasons]
+    H --> I[Display risk summary]
+    I --> J{View details?}
+    J -->|Yes| K[Show detailed breakdown]
+    J -->|No| Z([End])
+    K --> Z
 
-        D --> E --> F --> G --> H --> I --> J --> K
-        K -->|Yes| L --> M
-        K -->|No| M
-    end
+    C -->|Add to queue| L[Save email to Scan Queue]
+    L --> M[Add up to 7 emails]
+    M --> N[Scan selected emails]
+    N --> O[Batch request to backend]
+    O --> P[LLM batch analysis]
+    P --> Q[Deterministic scoring]
+    Q --> R[Return emails with score > 3]
+    R --> S[Display focused batch report]
+    S --> T{Full scan on one result?}
+    T -->|Yes| D
+    T -->|No| U[Reset queue]
+    U --> Z
 
-    %% Scan Queue / Batch Flow
-    subgraph QUEUE["📚 Scan Queue / Batch Flow"]
-        N[Add Email to Scan Queue]
-        O[Save selected email in queue]
-        P[User may add up to 7 emails]
-        Q[Scan Selected Emails]
-        R[Send queued emails in one batch request]
-        S[LLM analyzes selected emails in one batch call]
-        T[Backend calculates deterministic scores]
-        U[Return only emails with score greater than 3]
-        V[Display focused batch report]
-        W[Queue resets after successful scan]
-        X([End])
-
-        N --> O --> P --> Q --> R --> S --> T --> U --> V --> W --> X
-    end
-
-    %% Connections between flows
-    C -->|Single email scan| D
-    C -->|Add to scan queue| N
-    V -. User may run full scan on one result .-> D
-
-    %% Styles
-    classDef gmail fill:#E3F2FD,stroke:#1E88E5,stroke-width:2px,color:#0D47A1;
-    classDef scan fill:#E8F5E9,stroke:#43A047,stroke-width:2px,color:#1B5E20;
+    classDef user fill:#E3F2FD,stroke:#1E88E5,stroke-width:2px,color:#0D47A1;
     classDef backend fill:#FFF3E0,stroke:#FB8C00,stroke-width:2px,color:#E65100;
+    classDef result fill:#E8F5E9,stroke:#43A047,stroke-width:2px,color:#1B5E20;
     classDef decision fill:#F3E5F5,stroke:#8E24AA,stroke-width:2px,color:#4A148C;
     classDef endnode fill:#FFEBEE,stroke:#E53935,stroke-width:2px,color:#B71C1C;
 
-    class A,B gmail;
-    class C,K decision;
-    class D,E,F,G,H,I,J,L,N,O,P,Q,R,S,T,U,V,W scan;
-    class M,X endnode;
+    class A,B,D,L,M,N user;
+    class E,F,G,O,P,Q backend;
+    class H,I,K,R,S,U result;
+    class C,J,T decision;
+    class Z endnode;
 ```
 ---
 
@@ -142,6 +118,7 @@ flowchart LR
 - **Pydantic** — used for request and response validation.
 - **OpenAI API** — used for LLM-based email risk analysis.
 - **Uvicorn** — ASGI server used to run the FastAPI application.
+- **Python Logging** — used to track scan start, scan completion, scoring results, batch analysis, and backend errors for debugging.
 
 ### Deployment
 
@@ -157,6 +134,63 @@ flowchart LR
 
 ## Scoring Logic
 
+The system uses the LLM to identify and explain suspicious email indicators, but the final score is calculated by the backend.
+
+This separation makes the result more consistent and explainable:
+
+```text
+LLM
+Identifies risk signals and explains them by category
+
+Backend
+Calculates the final score using deterministic logic
+```
+
+### Risk Categories
+
+The email is analyzed across five risk categories:
+
+| Category | What It Measures |
+|---|---|
+| Sender Risk | Suspicious sender identity, spoofing, impersonation, or unusual domain |
+| Content Risk | Suspicious wording, sensitive requests, or unusual message content |
+| Social Engineering Risk | Urgency, pressure, fear tactics, or manipulation |
+| Link Risk | Suspicious URLs, fake login pages, or unsafe domains |
+| Attachment Risk | Suspicious attachment names, file types, or attachment-related indicators |
+
+### Weighted Score Formula
+
+The scoring weights were chosen according to common phishing patterns and the relative frequency and impact of typical phishing indicators.
+
+Sender impersonation and malicious links are among the most common and impactful phishing signals, so they receive the highest weight. Message content and social engineering patterns are also central indicators because phishing emails often rely on urgency, pressure, or requests for sensitive information. Attachment risk is included with a lower weight because attachments can be dangerous, but many phishing emails do not include attachments at all.
+
+| Category | Weight | Reason |
+|---|---:|---|
+| Sender Risk | 25% | Phishing often relies on spoofed, impersonated, or suspicious senders |
+| Link Risk | 25% | Malicious links and fake login pages are common phishing mechanisms |
+| Content Risk | 20% | Suspicious wording and sensitive requests are strong phishing indicators |
+| Social Engineering Risk | 20% | Urgency, pressure, and fear tactics are common phishing techniques |
+| Attachment Risk | 10% | Attachments may be dangerous, but not every phishing email includes one |
+
+```text
+Final Score =
+0.25 * Sender Risk
++ 0.20 * Content Risk
++ 0.20 * Social Engineering Risk
++ 0.25 * Link Risk
++ 0.10 * Attachment Risk
+```
+
+### Verdict Mapping
+
+| Final Score | Verdict |
+|---:|---|
+| 1–2 | Safe |
+| 3–4 | Low Risk |
+| 5–7 | Suspicious |
+| 8–10 | Malicious |
+
+For batch scans, only emails with a final score greater than 3/10 are shown in the report.
 The system uses the LLM to identify and explain suspicious email indicators, but the final score is calculated by the backend.
 
 This separation makes the system more explainable and consistent:
@@ -182,29 +216,38 @@ Final Score =
 The recommended way to run the backend is with Docker.  
 Running locally with Python is optional and mainly useful for development or debugging.
 
-### Run with Docker
-
-1. Clone the repository:
+### 1. Clone the Repository
 
 ```bash
 git clone <your-repository-url>
 cd gmail-security-assistant
 ```
 
-2. Create a `.env` file in the project root:
+### 2. Create Environment Variables
+
+Create a `.env` file in the project root:
 
 ```env
 OPENAI_API_KEY=your_openai_api_key_here
 ```
 
-3. Build and run the backend container:
+The `.env` file is required for the backend to call the OpenAI API and should not be committed to GitHub.
+
+### 3. Run the Backend with Docker
+
+Build the Docker image:
 
 ```bash
 docker build -t gmail-security-assistant-backend .
+```
+
+Run the container:
+
+```bash
 docker run --env-file .env -p 8000:10000 gmail-security-assistant-backend
 ```
 
-4. Verify the backend is running:
+Verify the backend is running:
 
 ```text
 http://localhost:8000/
@@ -216,9 +259,7 @@ Optional API documentation:
 http://localhost:8000/docs
 ```
 
----
-
-### Optional: Run Locally without Docker
+### 4. Optional: Run Locally without Docker
 
 ```bash
 python -m pip install -r requirements.txt
@@ -231,16 +272,24 @@ Backend URL:
 http://127.0.0.1:8000/
 ```
 
----
+### 5. Gmail Add-on Setup
 
-### Gmail Add-on Setup
+The Gmail Add-on code is located in:
+
+```text
+gmail-addon/Code.gs
+gmail-addon/appsscript.json
+```
+
+To run the add-on:
 
 1. Open Google Apps Script.
-2. Copy the code from `gmail-addon/Code.gs`.
-3. Copy the manifest from `gmail-addon/appsscript.json`.
-4. Save the Apps Script project.
-5. Install the test deployment.
-6. Open Gmail and launch the Gmail Security Assistant add-on.
+2. Create a new Apps Script project.
+3. Copy the contents of `gmail-addon/Code.gs`.
+4. Copy the contents of `gmail-addon/appsscript.json`.
+5. Save the project.
+6. Install the test deployment.
+7. Open Gmail and launch the Gmail Security Assistant add-on.
 
 ---
 
