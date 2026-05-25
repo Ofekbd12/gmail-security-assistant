@@ -193,22 +193,6 @@ Final Score =
 For batch scans, only emails with a final score greater than 3/10 are shown in the report.
 The system uses the LLM to identify and explain suspicious email indicators, but the final score is calculated by the backend.
 
-This separation makes the system more explainable and consistent:
-
-```text
-LLM
-Identifies risk signals and explains them by category
-
-Backend
-Calculates the final score using deterministic logic
-
-Final Score =
-0.25 * Sender Risk
-+ 0.20 * Content Risk
-+ 0.20 * Social Engineering Risk
-+ 0.25 * Link Risk
-+ 0.10 * Attachment Risk
-
 ---
 
 ## Setup and Run
